@@ -1,0 +1,35 @@
+# Installing banking-mcp
+
+Use this procedure when a user asks you to install this repository as an MCP server.
+
+## Required interaction
+
+1. If the user has not already chosen, ask exactly one question before changing anything: **Cloud, Local, or Both?** Recommend Cloud when the user wants Claude.ai, Codex Cloud, a phone, or several devices.
+2. Inspect `README.md`, `package.json`, `wrangler.jsonc`, and `scripts/setup.mjs`. Check Node.js is version 22 or newer.
+3. Install the locked dependencies with `npm ci`. Run `npm audit` and `npm run typecheck`; report a blocker before continuing if either reveals a material security or build failure.
+4. Run `npm run install:mcp` with `--cloud`, `--local`, or `--both`.
+5. Cloudflare authentication is interactive. Check with `npx wrangler whoami`; if needed, run `npx wrangler login` and let the user finish sign-in, verification, CAPTCHA, and two-factor authentication in the browser. Never ask the user to paste a Cloudflare password or session token into chat.
+6. For Cloud or Both, allow the installer to deploy the unconfigured shell first. Copy the exact Redirect, Privacy, and Terms URLs printed by the script to the user. They are needed to register a new Enable Banking application.
+7. Pause for exactly these two inputs:
+   - Enable Banking Application ID
+   - Local filesystem path to the downloaded PKCS#8 `.pem` private-key file
+
+   Do not ask for bank username, password, BankID data, account numbers, or unrelated personal information. Never print the private key, commit it, or upload it anywhere except as the intended encrypted Worker secret.
+8. Resume after the user has registered the Enable Banking application and linked the accounts allowed for Restricted access. In a non-interactive agent terminal, use `npm run install:mcp -- --cloud --yes --app-id=<id> --key-file=<local-path>` (or the selected mode). The script reads the key file directly; never paste its contents into the command or chat.
+9. Give the user the generated bank link. The user chooses Personal or Business and completes bank authorisation in the bank's own browser flow.
+10. Configure the requesting MCP client only if the user asked you to do so. Use the printed `/mcp` URL and generated connection password; do not commit either.
+
+## Verification
+
+- Run `npm run typecheck` and `npx wrangler deploy --dry-run`.
+- Cloud: confirm `/` returns 200, `/privacy` and `/terms` return 200, and `/setup` returns 404. Never expect a browser setup form.
+- Before credentials are installed, `/mcp` should return 503. After installation, verify an MCP `initialize` request succeeds with the generated bearer credential without exposing it in logs.
+- Confirm the bank-link page lists providers and distinguishes Personal from Business. The user must complete bank approval.
+
+## Safety boundaries
+
+- Make no destructive changes and do not rewrite Git history.
+- Do not edit or commit `.dev.vars`, `.pem`, `.key`, or generated credentials.
+- Use Cloudflare Worker secrets for cloud credentials. Do not store application secrets in D1.
+- This server is account-information only. Do not add bank-side write, transfer, beneficiary, or payment functionality as part of installation.
+- If access, authentication, credentials, or user approval is missing, stop at that exact point and ask only for what is missing.

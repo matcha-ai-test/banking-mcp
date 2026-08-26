@@ -1,0 +1,25 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "banking-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-24",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "vars": {
+    "BASE_URL": "http://127.0.0.1:8787"
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "MCP_OBJECT", "class_name": "BankingMCP" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["BankingMCP"] }],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "banking-mcp-db"
+    }
+  ],
+  "kv_namespaces": [
+    { "binding": "OAUTH_KV" }
+  ],
+  "triggers": { "crons": ["0 4 * * *"] },
+  "observability": { "enabled": true }
+}

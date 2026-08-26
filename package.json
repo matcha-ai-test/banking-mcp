@@ -1,0 +1,50 @@
+{
+  "name": "banking-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Read-only multi-bank MCP server for Claude and Codex via Enable Banking (PSD2 AIS). No bank-side writes or payments.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/matcha-ai-test/banking-mcp"
+  },
+  "keywords": [
+    "mcp",
+    "enable-banking",
+    "psd2",
+    "open-banking",
+    "claude",
+    "codex",
+    "cloudflare-workers"
+  ],
+  "scripts": {
+    "install:mcp": "node scripts/setup.mjs",
+    "setup": "node scripts/setup.mjs",
+    "setup:cloud": "node scripts/setup.mjs --cloud",
+    "setup:both": "node scripts/setup.mjs --both",
+    "auth:link": "node scripts/auth-link.mjs",
+    "start": "node scripts/start.mjs",
+    "dev": "node scripts/start.mjs",
+    "deploy": "node scripts/run-wrangler.mjs deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test test/*.test.mjs",
+    "tail": "node scripts/run-wrangler.mjs tail",
+    "db:schema": "node scripts/run-wrangler.mjs d1 execute banking-mcp-db --local --file=schema.sql"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^0.10.3",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "agents": "^0.21.0",
+    "jose": "^6.2.10",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "typescript": "^5.7.0",
+    "wrangler": "^4.125.0"
+  }
+}

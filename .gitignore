@@ -1,0 +1,11 @@
+node_modules/
+.wrangler/
+.env
+.env.*
+.dev.vars
+.mcp-credentials
+wrangler.local.jsonc
+*.pem
+*.key
+.DS_Store
+dist/
