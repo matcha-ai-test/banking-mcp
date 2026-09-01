@@ -1,8 +1,19 @@
 # banking-mcp
 
-[Svenska](README.sv.md) · **English**
+[![CI](https://github.com/matcha-ai-test/banking-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/matcha-ai-test/banking-mcp/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Private, read-only bank access for [Claude](https://claude.ai) and [Codex](https://openai.com/codex/), powered by [Enable Banking](https://enablebanking.com). It reads balances and transaction history from accounts you approve. **It has no bank-side write capability:** it cannot create, change, or delete bank data, move money, or initiate payments. It writes only to its own private cache.
+
+## Deploy to Cloudflare
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/matcha-ai-test/banking-mcp)
+
+One click clones this repository into your own GitHub account, provisions the D1 database, KV namespace, and Durable Object, and deploys the Worker with Workers Builds CI. The deploy runs into **your** Cloudflare account with **your** own Enable Banking application; no data flows to anyone else.
+
+It does **not** finish configuration. The Worker needs its deployed URL before you can register the Enable Banking application, so secrets are set afterwards, not on the deploy page. Until they are, `/mcp` returns `503 Not configured` and the bank endpoints stay closed. After the deploy finishes, clone your new repository locally and run `npm run install:mcp -- --cloud` to register the application, inject secrets, and link your bank. See [Cloud flow](#cloud-flow).
+
+Prefer to provision everything from the command line instead? Skip the button and follow [Install manually](#install-manually).
 
 ## Install with an AI agent
 
@@ -42,7 +53,6 @@ Explicit commands are also available:
 npm run install:mcp -- --cloud
 npm run install:mcp -- --local
 npm run install:mcp -- --both
-npm run install:mcp -- --lang=sv
 ```
 
 Setup stores the MCP URL, connection password, and bank link in Git-ignored `.mcp-credentials` with mode `0600`; for these client values the terminal prints only the file path, and `npm run auth:link` prints a fresh operator link locally when needed.
@@ -152,10 +162,10 @@ Bank availability is loaded live from Enable Banking. Its documentation covers c
 - [Enable Banking: API quick start](https://enablebanking.com/docs/api/quick-start/)
 - [Cloudflare Workers: Wrangler](https://developers.cloudflare.com/workers/wrangler/)
 
-## Credit
+## Contributing
 
-Created and maintained by the banking-mcp contributors.
+Bug reports, security reports, and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow and [SECURITY.md](SECURITY.md) for how to report a vulnerability privately.
 
 ## License
 
-MIT.
+MIT. See [LICENSE](LICENSE).

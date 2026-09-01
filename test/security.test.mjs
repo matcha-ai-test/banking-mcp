@@ -14,6 +14,7 @@ import {
 } from "../scripts/lib/wrangler-config.mjs";
 import { buildAuthStatus, buildSessionWarnings, serializeMcpText } from "../src/mcp-output.ts";
 import { migrate } from "../src/migrate.ts";
+import { isConfigured } from "../src/settings.ts";
 import { AUTH_COOKIE_TTL_MS, mintAuthCookie, verifyAuthCookie } from "../src/util.ts";
 
 function fakeSession(extra = {}) {
@@ -107,6 +108,28 @@ test("auth cookie round-trips, rejects tampering, and expires", async () => {
   assert.equal(await verifyAuthCookie(cookie, secret, Date.now() + AUTH_COOKIE_TTL_MS + 1000), false);
   assert.equal(await verifyAuthCookie(null, secret), false);
   assert.equal(await verifyAuthCookie("not-a-cookie", secret), false);
+});
+
+test("isConfigured rejects the .dev.vars.example placeholders a deploy button can seed", () => {
+  assert.equal(
+    isConfigured({
+      EB_APP_ID: "your-enable-banking-application-id",
+      EB_PRIVATE_KEY: '-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----',
+      MCP_SECRET: "generated-connection-password",
+      START_TOKEN: "generated-bank-link-token",
+    }),
+    false
+  );
+  assert.equal(isConfigured({}), false);
+  assert.equal(
+    isConfigured({
+      EB_APP_ID: "real-app-id",
+      EB_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\nMIIBVgIBADANBgkq\n-----END PRIVATE KEY-----",
+      MCP_SECRET: "a-real-generated-password",
+      START_TOKEN: "a-real-generated-token",
+    }),
+    true
+  );
 });
 
 test("local Wrangler override leaves the tracked template unchanged", () => {
