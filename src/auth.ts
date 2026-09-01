@@ -1,6 +1,6 @@
 import { Db } from "./db";
 import { EbClient, type Aspsp } from "./eb";
-import { authGatePage, bankPickerPage, esc, languageFromRequest, pageResponse, type Lang } from "./pages";
+import { authGatePage, bankPickerPage, esc, pageResponse } from "./pages";
 import { backfillAccounts } from "./sync";
 import type { AccountRow, Env, PsuType } from "./types";
 import { AUTH_COOKIE_NAME, AUTH_COOKIE_TTL_MS, cookieFrom, maskIban, mintAuthCookie, rateLimitKey, secretsMatch, verifyAuthCookie } from "./util";
@@ -22,8 +22,8 @@ function json(data: unknown, status = 200): Response {
   });
 }
 
-function authPage(request: Request, lang: Lang, title: string, body: string, status = 200): Response {
-  return pageResponse({ title, body, status, lang, currentUrl: request.url });
+function authPage(title: string, body: string, status = 200): Response {
+  return pageResponse({ title, body, status });
 }
 
 function operatorAuthorized(request: Request, env: Env): Promise<boolean> {
@@ -80,29 +80,24 @@ export async function handleAuthBanks(request: Request, env: Env): Promise<Respo
 
 export async function handleAuthStart(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
-  const lang = languageFromRequest(request);
   if (!(await operatorAuthorized(request, env))) {
     // The operator link carries the token in the fragment; serve the exchange
     // page that trades it for the cookie without putting it in any URL.
-    return authGatePage(request);
+    return authGatePage();
   }
   const psuType = (url.searchParams.get("psu") === "business" ? "business" : "personal") as PsuType;
   const bankParam = url.searchParams.get("bank");
   const country = (url.searchParams.get("country") ?? "").toUpperCase();
 
   if (!bankParam) {
-    return bankPickerPage(request);
+    return bankPickerPage();
   }
 
   const db = new Db(env);
   if (!(await db.rateLimitOk(await rateLimitKey(request, "auth_start"), AUTH_START_LIMIT_PER_HOUR, 3600_000))) {
     return authPage(
-      request,
-      lang,
-      lang === "sv" ? "För många försök" : "Too many attempts",
-      lang === "sv"
-        ? `<h1>För många försök</h1><p>Högst ${AUTH_START_LIMIT_PER_HOUR} bankanslutningar kan startas per timme. Försök igen senare.</p>`
-        : `<h1>Too many attempts</h1><p>Max ${AUTH_START_LIMIT_PER_HOUR} authorisation starts per hour. Try again later.</p>`,
+      "Too many attempts",
+      `<h1>Too many attempts</h1><p>Max ${AUTH_START_LIMIT_PER_HOUR} authorisation starts per hour. Try again later.</p>`,
       429
     );
   }
@@ -115,25 +110,16 @@ export async function handleAuthStart(request: Request, env: Env): Promise<Respo
     (a) => a.name.toLowerCase() === bankParam.toLowerCase() && (!country || a.country.toUpperCase() === country)
   );
   if (!bank) {
-    const retry = `/auth/start?lang=${lang}`;
     return authPage(
-      request,
-      lang,
-      lang === "sv" ? "Okänd bank" : "Unknown bank",
-      lang === "sv"
-        ? `<h1>Okänd bank</h1><p><a href="${retry}">Välj en bank från listan</a>. Enable Bankings namn måste matcha exakt.</p>`
-        : `<h1>Unknown bank</h1><p><a href="${retry}">Pick a bank from the list</a>. Enable Banking names must match exactly.</p>`,
+      "Unknown bank",
+      `<h1>Unknown bank</h1><p><a href="/auth/start">Pick a bank from the list</a>. Enable Banking names must match exactly.</p>`,
       400
     );
   }
   if (bank.psu_types && !bank.psu_types.includes(psuType)) {
     return authPage(
-      request,
-      lang,
-      lang === "sv" ? "Fel kontotyp" : "Wrong account type",
-      lang === "sv"
-        ? `<h1>Fel kontotyp</h1><p>${esc(bank.name)} stöder inte <code>${psuType}</code>. Tillgängliga typer: ${esc(bank.psu_types.join(", "))}.</p>`
-        : `<h1>Wrong account type</h1><p>${esc(bank.name)} does not support <code>${psuType}</code>. Available: ${esc(bank.psu_types.join(", "))}.</p>`,
+      "Wrong account type",
+      `<h1>Wrong account type</h1><p>${esc(bank.name)} does not support <code>${psuType}</code>. Available: ${esc(bank.psu_types.join(", "))}.</p>`,
       400
     );
   }
@@ -159,34 +145,27 @@ export async function handleAuthStart(request: Request, env: Env): Promise<Respo
 
 export async function handleAuthCallback(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
-  const lang = languageFromRequest(request);
   const code = url.searchParams.get("code");
   const state = url.searchParams.get("state");
   const error = url.searchParams.get("error");
 
   if (error) {
     return authPage(
-      request,
-      lang,
-      lang === "sv" ? "Bankanslutningen avbröts" : "Authorisation cancelled",
-      lang === "sv"
-        ? "<h1>Bankanslutningen avbröts eller nekades</h1><p>Starta om från <strong>Välj bank</strong> när du vill försöka igen.</p>"
-        : "<h1>Authorisation was cancelled or rejected</h1><p>Restart from <strong>Choose bank</strong> when you want to try again.</p>",
+      "Authorisation cancelled",
+      "<h1>Authorisation was cancelled or rejected</h1><p>Restart from <strong>Choose bank</strong> when you want to try again.</p>",
       400
     );
   }
   if (!code || !state || !/^[0-9a-f-]{36}$/i.test(state)) {
-    return authPage(request, lang, lang === "sv" ? "Ogiltig begäran" : "Invalid request", lang === "sv" ? "<h1>Ogiltig begäran</h1><p>Kod eller state saknas.</p>" : "<h1>Invalid request</h1><p>Missing code or state.</p>", 400);
+    return authPage("Invalid request", "<h1>Invalid request</h1><p>Missing code or state.</p>", 400);
   }
 
   const db = new Db(env);
   const psuType = await db.consumeAuthState(state, STATE_TTL_MINUTES);
   if (!psuType) {
     return authPage(
-      request,
-      lang,
-      lang === "sv" ? "Länken har gått ut" : "Expired or already used",
-      lang === "sv" ? "<h1>Länken har gått ut eller har redan använts</h1><p>Öppna banklänken som installationsskriptet visade och välj banken igen.</p>" : "<h1>Expired or already used</h1><p>Open the bank link printed by the installer and choose the bank again.</p>",
+      "Expired or already used",
+      "<h1>Expired or already used</h1><p>Open the bank link printed by the installer and choose the bank again.</p>",
       400
     );
   }
@@ -238,25 +217,19 @@ export async function handleAuthCallback(request: Request, env: Env): Promise<Re
       .map((r) => {
         const acc = accountRows.find((a) => a.account_uid === r.account_uid);
         const label = maskIban(acc?.iban) ?? `${r.account_uid.slice(0, 4)}…`;
-        return `<li><code>${esc(label)}</code>: ${r.error ? `${lang === "sv" ? "Fel" : "Error"}: ${esc(r.error)}` : `${r.new_transactions} ${lang === "sv" ? "transaktioner" : "transactions"}`}</li>`;
+        return `<li><code>${esc(label)}</code>: ${r.error ? `Error: ${esc(r.error)}` : `${r.new_transactions} transactions`}</li>`;
       })
       .join("");
 
     return authPage(
-      request,
-      lang,
-      lang === "sv" ? "Banken är ansluten" : "Bank connected",
-      lang === "sv"
-        ? `<h1>Banken är ansluten</h1><p>${esc(aspspName)} (${psuType}) är aktiv till <strong>${esc((session.access?.valid_until ?? "").slice(0, 10))}</strong>.</p><p>${accountRows.length} konton och ${total} transaktioner hämtades i den första synkningen:</p><ul>${lines}</ul><p>Du kan stänga fliken. Claude och Codex kan nu läsa informationen.</p>`
-        : `<h1>Connected</h1><p>${esc(aspspName)} (${psuType}) is active until <strong>${esc((session.access?.valid_until ?? "").slice(0, 10))}</strong>.</p><p>${accountRows.length} account(s), ${total} transactions pulled in the first sync:</p><ul>${lines}</ul><p>You can close this tab. Claude and Codex can read the data now.</p>`
+      "Bank connected",
+      `<h1>Connected</h1><p>${esc(aspspName)} (${psuType}) is active until <strong>${esc((session.access?.valid_until ?? "").slice(0, 10))}</strong>.</p><p>${accountRows.length} account(s), ${total} transactions pulled in the first sync:</p><ul>${lines}</ul><p>You can close this tab. Claude and Codex can read the data now.</p>`
     );
   } catch (e) {
     console.warn("Bank session creation failed", { name: (e as Error).name });
     return authPage(
-      request,
-      lang,
-      lang === "sv" ? "Bankanslutningen misslyckades" : "Could not create the bank session",
-      lang === "sv" ? "<h1>Bankanslutningen kunde inte skapas</h1><p>Försök igen från banklänken. Om felet kvarstår kontrollerar du Application ID, privat nyckel och redirect URL.</p>" : "<h1>Could not create the bank session</h1><p>Try the bank link again. If it continues, check the Application ID, private key, and redirect URL.</p>",
+      "Could not create the bank session",
+      "<h1>Could not create the bank session</h1><p>Try the bank link again. If it continues, check the Application ID, private key, and redirect URL.</p>",
       500
     );
   }

@@ -23,9 +23,9 @@ const defaultHandler = {
     const url = new URL(request.url);
     const path = url.pathname;
     try {
-      if (path === "/privacy") return privacyPage(request);
-      if (path === "/terms") return termsPage(request);
-      if (path === "/") return homePage(request, isConfigured(env));
+      if (path === "/privacy") return privacyPage();
+      if (path === "/terms") return termsPage();
+      if (path === "/") return homePage(isConfigured(env));
       if (path === "/auth/start") {
         if (!isConfigured(env)) return new Response("Not configured. Run npm run install:mcp from the repository.", { status: 503 });
         return await handleAuthStart(request, env);
