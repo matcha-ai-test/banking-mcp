@@ -30,6 +30,45 @@ export async function secretsMatch(presented: string | null | undefined, expecte
   return diff === 0;
 }
 
+export const AUTH_COOKIE_NAME = "banking_auth";
+export const AUTH_COOKIE_TTL_MS = 30 * 60_000;
+
+async function authCookieMac(expiresAtMs: number, secret: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const mac = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`auth-cookie:${expiresAtMs}`));
+  return [...new Uint8Array(mac)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * The operator link carries the token in the URL fragment, which never reaches
+ * the server. The browser exchanges it once over POST for this short-lived
+ * HMAC-signed cookie, so the token never appears in a request URL that
+ * Cloudflare's invocation logs would record.
+ */
+export async function mintAuthCookie(secret: string, nowMs = Date.now()): Promise<string> {
+  const expiresAtMs = nowMs + AUTH_COOKIE_TTL_MS;
+  return `${expiresAtMs}.${await authCookieMac(expiresAtMs, secret)}`;
+}
+
+export async function verifyAuthCookie(value: string | null | undefined, secret: string | undefined, nowMs = Date.now()): Promise<boolean> {
+  if (!value || !secret) return false;
+  const [expiryPart, macPart] = value.split(".");
+  const expiresAtMs = Number(expiryPart);
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs < nowMs || !macPart) return false;
+  return secretsMatch(macPart, await authCookieMac(expiresAtMs, secret));
+}
+
+export function cookieFrom(request: Request, name: string): string | null {
+  const match = (request.headers.get("Cookie") ?? "").match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
+  return match ? match[1] : null;
+}
+
 export function bearerFrom(request: Request): string | null {
   const h = request.headers.get("Authorization") ?? "";
   const m = h.match(/^Bearer\s+(.+)$/i);

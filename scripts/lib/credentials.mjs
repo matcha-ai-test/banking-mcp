@@ -5,7 +5,10 @@ function credentialLine(name, value) {
 }
 
 export function bankLink(baseUrl, startToken) {
-  return `${baseUrl.replace(/\/$/, "")}/auth/start?k=${encodeURIComponent(startToken)}`;
+  // Fragment, not query: the token must never appear in a request URL, where
+  // Cloudflare's invocation logs and proxies would record it. The /auth/start
+  // page exchanges it for a short-lived cookie over POST.
+  return `${baseUrl.replace(/\/$/, "")}/auth/start#k=${encodeURIComponent(startToken)}`;
 }
 
 /** Persist client-facing secrets locally and emit only a safe pointer to stdout. */

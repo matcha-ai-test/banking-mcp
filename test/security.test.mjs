@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
-import { writeClientCredentials } from "../scripts/lib/credentials.mjs";
+import { bankLink, writeClientCredentials } from "../scripts/lib/credentials.mjs";
 import {
   ensureLocalWranglerConfig,
   localWranglerConfig,
@@ -14,6 +14,7 @@ import {
 } from "../scripts/lib/wrangler-config.mjs";
 import { buildAuthStatus, buildSessionWarnings, serializeMcpText } from "../src/mcp-output.ts";
 import { migrate } from "../src/migrate.ts";
+import { AUTH_COOKIE_TTL_MS, mintAuthCookie, verifyAuthCookie } from "../src/util.ts";
 
 function fakeSession(extra = {}) {
   return {
@@ -87,6 +88,25 @@ test("setup credential writer uses mode 0600 and keeps secrets out of stdout", (
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("bank link keeps the operator token in the URL fragment, never the query string", () => {
+  const link = bankLink("https://worker.example.test/", "test-operator-start-token");
+
+  assert.equal(link, "https://worker.example.test/auth/start#k=test-operator-start-token");
+  assert.equal(link.includes("?"), false);
+});
+
+test("auth cookie round-trips, rejects tampering, and expires", async () => {
+  const secret = "test-operator-start-token";
+  const cookie = await mintAuthCookie(secret);
+
+  assert.equal(await verifyAuthCookie(cookie, secret), true);
+  assert.equal(await verifyAuthCookie(cookie, "another-secret"), false);
+  assert.equal(await verifyAuthCookie(`${Number(cookie.split(".")[0]) + 1}.${cookie.split(".")[1]}`, secret), false);
+  assert.equal(await verifyAuthCookie(cookie, secret, Date.now() + AUTH_COOKIE_TTL_MS + 1000), false);
+  assert.equal(await verifyAuthCookie(null, secret), false);
+  assert.equal(await verifyAuthCookie("not-a-cookie", secret), false);
 });
 
 test("local Wrangler override leaves the tracked template unchanged", () => {

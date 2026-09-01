@@ -147,7 +147,9 @@ function ensureCloudLoggedIn() {
   if (/not authenticated|not logged in/i.test(who) || (/error/i.test(who) && /login/i.test(who))) {
     wrangler(["login"], { stdio: "inherit" });
   } else {
-    console.log(who.trim());
+    // Never echo the raw whoami output: it contains the Cloudflare account ID
+    // and the API token's permission table, which do not belong in transcripts.
+    console.log(tr("Cloudflare login verified.", "Cloudflare-inloggningen är verifierad."));
   }
 }
 

@@ -1,4 +1,4 @@
-import type { EbSessionRow } from "./types";
+import type { AuthStatusSessionRow } from "./types";
 
 export const RENEWAL_HINT =
   "Run 'npm run auth:link' on the operator machine to print a bank re-authorization link.";
@@ -13,7 +13,7 @@ function daysUntil(iso: string | null | undefined, nowMs = Date.now()): number |
 }
 
 /** Build warning text without accepting or serializing any operator secret. */
-export function buildSessionWarnings(sessions: EbSessionRow[], nowMs = Date.now()): string {
+export function buildSessionWarnings(sessions: AuthStatusSessionRow[], nowMs = Date.now()): string {
   const lines: string[] = [];
   for (const session of sessions) {
     const left = daysUntil(session.valid_until, nowMs);
@@ -27,7 +27,7 @@ export function buildSessionWarnings(sessions: EbSessionRow[], nowMs = Date.now(
 }
 
 /** Build the cached auth-status payload. Unknown properties are deliberately not copied. */
-export function buildAuthStatus(sessions: EbSessionRow[], today = new Date().toISOString().slice(0, 10)) {
+export function buildAuthStatus(sessions: AuthStatusSessionRow[], today = new Date().toISOString().slice(0, 10)) {
   return {
     note: CACHED_NOTE,
     renewal: RENEWAL_HINT,

@@ -1,9 +1,9 @@
 import { Db } from "./db";
 import { EbClient, type Aspsp } from "./eb";
-import { bankPickerPage, esc, languageFromRequest, pageResponse, type Lang } from "./pages";
+import { authGatePage, bankPickerPage, esc, languageFromRequest, pageResponse, type Lang } from "./pages";
 import { backfillAccounts } from "./sync";
 import type { AccountRow, Env, PsuType } from "./types";
-import { maskIban, rateLimitKey, secretsMatch } from "./util";
+import { AUTH_COOKIE_NAME, AUTH_COOKIE_TTL_MS, cookieFrom, maskIban, mintAuthCookie, rateLimitKey, secretsMatch, verifyAuthCookie } from "./util";
 
 const MAX_CONSENT_DAYS = 180;
 const AUTH_START_LIMIT_PER_HOUR = 10;
@@ -26,9 +26,44 @@ function authPage(request: Request, lang: Lang, title: string, body: string, sta
   return pageResponse({ title, body, status, lang, currentUrl: request.url });
 }
 
+function operatorAuthorized(request: Request, env: Env): Promise<boolean> {
+  return verifyAuthCookie(cookieFrom(request, AUTH_COOKIE_NAME), env.START_TOKEN);
+}
+
+/**
+ * POST { k } → short-lived HttpOnly cookie. The operator link keeps the token
+ * in the URL fragment, so it never appears in a request URL and therefore
+ * never reaches Cloudflare's invocation logs; this endpoint receives it in the
+ * request body instead.
+ */
+export async function handleAuthSession(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "POST") return new Response("Not found", { status: 404 });
+  const db = new Db(env);
+  if (!(await db.rateLimitOk(await rateLimitKey(request, "auth_session"), AUTH_START_LIMIT_PER_HOUR, 3600_000))) {
+    return new Response("Too many attempts", { status: 429 });
+  }
+  let presented: unknown;
+  try {
+    presented = ((await request.json()) as { k?: unknown }).k;
+  } catch {
+    presented = null;
+  }
+  if (typeof presented !== "string" || !(await secretsMatch(presented, env.START_TOKEN))) {
+    return new Response("Not found", { status: 404 });
+  }
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "Set-Cookie": `${AUTH_COOKIE_NAME}=${await mintAuthCookie(env.START_TOKEN!)}; Path=/auth; Max-Age=${Math.floor(AUTH_COOKIE_TTL_MS / 1000)}; HttpOnly; Secure; SameSite=Lax`,
+      "Cache-Control": "no-store",
+      "Referrer-Policy": "no-referrer",
+    },
+  });
+}
+
 export async function handleAuthBanks(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
-  if (!(await secretsMatch(url.searchParams.get("k"), env.START_TOKEN))) {
+  if (!(await operatorAuthorized(request, env))) {
     return new Response("Not found", { status: 404 });
   }
   const country = (url.searchParams.get("country") ?? "").toUpperCase();
@@ -46,8 +81,10 @@ export async function handleAuthBanks(request: Request, env: Env): Promise<Respo
 export async function handleAuthStart(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const lang = languageFromRequest(request);
-  if (!(await secretsMatch(url.searchParams.get("k"), env.START_TOKEN))) {
-    return new Response("Not found", { status: 404 });
+  if (!(await operatorAuthorized(request, env))) {
+    // The operator link carries the token in the fragment; serve the exchange
+    // page that trades it for the cookie without putting it in any URL.
+    return authGatePage(request);
   }
   const psuType = (url.searchParams.get("psu") === "business" ? "business" : "personal") as PsuType;
   const bankParam = url.searchParams.get("bank");
@@ -78,7 +115,7 @@ export async function handleAuthStart(request: Request, env: Env): Promise<Respo
     (a) => a.name.toLowerCase() === bankParam.toLowerCase() && (!country || a.country.toUpperCase() === country)
   );
   if (!bank) {
-    const retry = `/auth/start?k=${encodeURIComponent(url.searchParams.get("k") ?? "")}&lang=${lang}`;
+    const retry = `/auth/start?lang=${lang}`;
     return authPage(
       request,
       lang,

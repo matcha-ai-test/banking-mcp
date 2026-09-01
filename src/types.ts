@@ -24,6 +24,9 @@ export interface EbSessionRow {
   updated_at: string;
 }
 
+/** Session columns safe to feed the MCP output layer: no id, no session_id. */
+export type AuthStatusSessionRow = Omit<EbSessionRow, "id" | "session_id">;
+
 export interface AccountRow {
   account_uid: string;
   session_pk: string;

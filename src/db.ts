@@ -1,4 +1,4 @@
-import type { AccountRow, BalanceRow, EbSessionRow, Env, PsuType, TxRow } from "./types";
+import type { AccountRow, AuthStatusSessionRow, BalanceRow, EbSessionRow, Env, PsuType, TxRow } from "./types";
 
 /**
  * D1 repository. The database is bound directly to the Worker — it has no
@@ -20,11 +20,18 @@ export class Db {
     return r.results;
   }
 
-  async allSessions(limit = 10): Promise<EbSessionRow[]> {
+  /**
+   * Feeds the MCP auth-status payload. Deliberately never selects id or
+   * session_id, so upstream session identifiers cannot reach the output layer
+   * even if buildAuthStatus regresses to copying whole rows.
+   */
+  async allSessions(limit = 10): Promise<AuthStatusSessionRow[]> {
     const r = await this.d1
-      .prepare("SELECT * FROM eb_sessions ORDER BY updated_at DESC LIMIT ?")
+      .prepare(
+        "SELECT psu_type, aspsp_name, aspsp_country, valid_until, status, refresh_count_today, refresh_count_date, renewal_due, backoff_until, last_live_verified_at, last_live_result, updated_at FROM eb_sessions ORDER BY updated_at DESC LIMIT ?"
+      )
       .bind(limit)
-      .all<EbSessionRow>();
+      .all<AuthStatusSessionRow>();
     return r.results;
   }
 
