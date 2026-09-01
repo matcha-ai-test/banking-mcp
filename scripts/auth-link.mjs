@@ -37,6 +37,20 @@ const configPath = selectWranglerConfig(root);
 const baseUrl = readBaseUrl(configPath);
 if (!baseUrl) fail(`BASE_URL is missing from ${configPath}.`);
 
+function arg(name) {
+  const hit = process.argv.slice(2).find((a) => a.startsWith(`--${name}=`));
+  return hit ? hit.split("=").slice(1).join("=") : undefined;
+}
+
+// The operator names the bank they already linked in the Enable Banking Control
+// Panel; the server starts the session for it. There is no in-app bank browser.
+const bank = arg("bank");
+if (!bank) {
+  fail("Name the bank: npm run auth:link -- --bank=<ASPSP name> [--psu=business] [--country=SE]. It must match Enable Banking's ASPSP name.");
+}
+const psu = arg("psu") === "business" ? "business" : "personal";
+const country = arg("country");
+
 // This command is intentionally operator-only: the tokenized link is printed
 // only in the local terminal and is never returned through MCP.
-console.log(bankLink(baseUrl, startToken));
+console.log(bankLink(baseUrl, startToken, { bank, psu, country }));

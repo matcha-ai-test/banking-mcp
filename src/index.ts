@@ -1,5 +1,5 @@
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
-import { handleAuthCallback, handleAuthSession, handleAuthStart, handleAuthBanks } from "./auth";
+import { handleAuthCallback, handleAuthSession, handleAuthStart } from "./auth";
 import { BankingMCP } from "./mcp";
 import { migrate } from "./migrate";
 import { handleAuthorize } from "./oauth";
@@ -29,10 +29,6 @@ const defaultHandler = {
       if (path === "/auth/start") {
         if (!isConfigured(env)) return new Response("Not configured. Run npm run install:mcp from the repository.", { status: 503 });
         return await handleAuthStart(request, env);
-      }
-      if (path === "/auth/banks") {
-        if (!isConfigured(env)) return new Response("Not found", { status: 404 });
-        return await handleAuthBanks(request, env);
       }
       if (path === "/auth/session") {
         if (!isConfigured(env)) return new Response("Not found", { status: 404 });
@@ -68,7 +64,6 @@ export default {
       path === "/privacy" ||
       path === "/terms" ||
       path === "/auth/start" ||
-      path === "/auth/banks" ||
       path === "/auth/session" ||
       path === "/auth/callback"
     ) {

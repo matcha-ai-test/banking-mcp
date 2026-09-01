@@ -55,7 +55,7 @@ npm run install:mcp -- --local
 npm run install:mcp -- --both
 ```
 
-Setup stores the MCP URL, connection password, and bank link in Git-ignored `.mcp-credentials` with mode `0600`; for these client values the terminal prints only the file path, and `npm run auth:link` prints a fresh operator link locally when needed.
+Setup stores the MCP URL and connection password in Git-ignored `.mcp-credentials` with mode `0600`; for these client values the terminal prints only the file path. To connect a bank, run `npm run auth:link -- --bank=<ASPSP name>` on the operator machine, which prints a link locally. There is no in-app bank browser: you name the bank you already linked in the Enable Banking Control Panel.
 
 Cloud setup keeps the tracked `wrangler.jsonc` template unchanged by writing discovered deployment values to Git-ignored `wrangler.local.jsonc`; `npm run dev` and `npm run deploy` select that local config automatically when it exists.
 
@@ -74,7 +74,7 @@ npm run install:mcp -- --cloud --yes --app-id=<id> --key-file="/path/to/key.pem"
    - Choose **Generate in the browser** and export the private key.
    - For personal, restricted use, activate by linking your own accounts.
 4. Return with only the Application ID and the local path to the downloaded `.pem` file. The installer stores them as encrypted Cloudflare Worker secrets and deploys the configured server.
-5. Open `.mcp-credentials` locally and use its bank link. Choose **Personal** for privately owned accounts or **Business** for company-owned accounts, then approve at your bank.
+5. Connect a bank with `npm run auth:link -- --bank=<ASPSP name>` (add `--psu=business` for company accounts). The name must match Enable Banking's ASPSP name. Open the printed link and approve at your bank.
 6. Connect your MCP client using `MCP_URL` and `CONNECTION_PASSWORD` from `.mcp-credentials`. See [Connecting a client](#connecting-a-client).
 
 The `.pem` file is the Enable Banking application's private RSA key, used to sign API calls. It is not a bank login credential. Keep it secret and never commit it. It normally begins with `-----BEGIN PRIVATE KEY-----`. If it begins with `-----BEGIN RSA PRIVATE KEY-----`, convert a copy to PKCS#8:

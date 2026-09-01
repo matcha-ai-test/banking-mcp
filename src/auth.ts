@@ -1,6 +1,6 @@
 import { Db } from "./db";
 import { EbClient, type Aspsp } from "./eb";
-import { authGatePage, bankPickerPage, esc, pageResponse } from "./pages";
+import { authGatePage, esc, pageResponse } from "./pages";
 import { backfillAccounts } from "./sync";
 import type { AccountRow, Env, PsuType } from "./types";
 import { AUTH_COOKIE_NAME, AUTH_COOKIE_TTL_MS, cookieFrom, maskIban, mintAuthCookie, rateLimitKey, secretsMatch, verifyAuthCookie } from "./util";
@@ -8,19 +8,6 @@ import { AUTH_COOKIE_NAME, AUTH_COOKIE_TTL_MS, cookieFrom, maskIban, mintAuthCoo
 const MAX_CONSENT_DAYS = 180;
 const AUTH_START_LIMIT_PER_HOUR = 10;
 const STATE_TTL_MINUTES = 15;
-
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      "Content-Type": "application/json",
-      "Cache-Control": "no-store",
-      "Referrer-Policy": "no-referrer",
-      "X-Content-Type-Options": "nosniff",
-      "X-Robots-Tag": "noindex",
-    },
-  });
-}
 
 function authPage(title: string, body: string, status = 200): Response {
   return pageResponse({ title, body, status });
@@ -61,23 +48,6 @@ export async function handleAuthSession(request: Request, env: Env): Promise<Res
   });
 }
 
-export async function handleAuthBanks(request: Request, env: Env): Promise<Response> {
-  const url = new URL(request.url);
-  if (!(await operatorAuthorized(request, env))) {
-    return new Response("Not found", { status: 404 });
-  }
-  const country = (url.searchParams.get("country") ?? "").toUpperCase();
-  const eb = new EbClient(env);
-  const aspsps = await eb.getAspsps(country || undefined);
-  const banks = aspsps.map((a) => ({
-    name: a.name,
-    country: a.country,
-    psu_types: a.psu_types ?? ["personal", "business"],
-  }));
-  const countries = [...new Set(banks.map((b) => b.country))].sort();
-  return json({ banks, countries });
-}
-
 export async function handleAuthStart(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   if (!(await operatorAuthorized(request, env))) {
@@ -90,7 +60,11 @@ export async function handleAuthStart(request: Request, env: Env): Promise<Respo
   const country = (url.searchParams.get("country") ?? "").toUpperCase();
 
   if (!bankParam) {
-    return bankPickerPage();
+    return authPage(
+      "No bank specified",
+      "<h1>No bank specified</h1><p>Run <code>npm run auth:link -- --bank=&lt;bank name&gt;</code> on the operator machine and open the link it prints. The name must match Enable Banking's ASPSP name.</p>",
+      400
+    );
   }
 
   const db = new Db(env);

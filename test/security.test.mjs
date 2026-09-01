@@ -68,7 +68,6 @@ test("setup credential writer uses mode 0600 and keeps secrets out of stdout", (
     writeClientCredentials({
       filePath,
       mcpSecret,
-      startToken,
       localUrl: "http://127.0.0.1:8787",
       cloudUrl: "https://worker.example.test",
       mode: "both",
@@ -79,23 +78,28 @@ test("setup credential writer uses mode 0600 and keeps secrets out of stdout", (
     const file = readFileSync(filePath, "utf8");
     assert.match(file, /MCP_URL=/);
     assert.match(file, /CONNECTION_PASSWORD=/);
-    assert.match(file, /BANK_LINK=/);
+    assert.match(file, /auth:link -- --bank=/);
     assert.ok(file.includes(mcpSecret));
-    assert.ok(file.includes(startToken));
+    // The operator token stays in .dev.vars, never in .mcp-credentials.
+    assert.equal(file.includes(startToken), false);
     assert.equal(stdout.length, 1);
     assert.ok(stdout[0].includes(filePath));
     assert.equal(stdout[0].includes(mcpSecret), false);
-    assert.equal(stdout[0].includes(startToken), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("bank link keeps the operator token in the URL fragment, never the query string", () => {
-  const link = bankLink("https://worker.example.test/", "test-operator-start-token");
+test("bank link keeps the operator token in the fragment and the bank name in the query", () => {
+  const plain = bankLink("https://worker.example.test/", "test-operator-start-token");
+  assert.equal(plain, "https://worker.example.test/auth/start#k=test-operator-start-token");
+  assert.equal(plain.includes("?"), false);
 
-  assert.equal(link, "https://worker.example.test/auth/start#k=test-operator-start-token");
-  assert.equal(link.includes("?"), false);
+  const withBank = bankLink("https://worker.example.test/", "tok", { bank: "PayPal", psu: "personal", country: "SE" });
+  assert.equal(withBank.includes("#k=tok"), true);
+  assert.match(withBank, /\/auth\/start\?[^#]*bank=PayPal/);
+  // The token must never precede the fragment marker.
+  assert.equal(withBank.split("#")[0].includes("tok"), false);
 });
 
 test("auth cookie round-trips, rejects tampering, and expires", async () => {

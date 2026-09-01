@@ -1,7 +1,7 @@
 import type { AuthStatusSessionRow } from "./types";
 
 export const RENEWAL_HINT =
-  "Run 'npm run auth:link' on the operator machine to print a bank re-authorization link.";
+  "Run 'npm run auth:link -- --bank=<ASPSP name>' on the operator machine to print a bank re-authorization link.";
 export const REFRESH_BUDGET_PER_DAY = 3;
 
 const CACHED_NOTE =
@@ -47,9 +47,9 @@ export function buildAuthStatus(sessions: AuthStatusSessionRow[], today = new Da
       rate_limit_backoff_until: session.backoff_until,
     })),
     add_bank:
-      "To connect another bank, first whitelist its accounts in the Enable Banking Control Panel, then run 'npm run auth:link' on the operator machine.",
+      "To connect another bank, first whitelist its accounts in the Enable Banking Control Panel, then run 'npm run auth:link -- --bank=<ASPSP name>' on the operator machine.",
     add_business:
-      "To add business accounts, use the operator link, choose Business, and complete the bank login. Accounts must be whitelisted first.",
+      "To add business accounts, run 'npm run auth:link -- --bank=<ASPSP name> --psu=business' on the operator machine and complete the bank login. Accounts must be whitelisted first.",
   };
 }
 
