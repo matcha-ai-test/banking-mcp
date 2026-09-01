@@ -17,8 +17,6 @@ Application ID och den lokala sökvägen till den nedladdade .pem-nyckeln.
 
 Agentens exakta arbetsgång finns i [AGENTS.md](AGENTS.md). Det finns medvetet **ingen webbaserad installationssida**. Installation, hemligheter, publicering och kontroll hanteras från det klonade repot.
 
-Om repot är privat behöver agenten en GitHub-inloggning som har åtkomst.
-
 ## Installera manuellt
 
 Krav: Node.js 22+ och npm.
@@ -34,7 +32,7 @@ Installationsskriptet frågar först:
 
 | Läge | Använd för |
 |---|---|
-| **Moln** | Claude.ai, Codex Cloud, telefon eller flera enheter. Rekommenderas. |
+| **Moln** | Claude.ai och andra fjärranslutna MCP-klienter, telefon eller flera enheter. Rekommenderas. |
 | **Lokalt** | Claude Code eller Codex på en dator. |
 | **Båda** | Lokala klienter och molnklienter som delar molndatabasen. |
 
@@ -67,7 +65,7 @@ npm run install:mcp -- --cloud --yes --app-id=<id> --key-file="/sökväg/till/ny
    - För privat och begränsad användning aktiverar du appen genom att länka dina egna konton.
 4. Återvänd med endast ditt Application ID och den lokala sökvägen till den nedladdade `.pem`-filen. Skriptet sparar dem som krypterade Cloudflare Worker-hemligheter och publicerar den färdiga servern.
 5. Öppna `.mcp-credentials` lokalt och använd banklänken där. Välj **Personal** för privatägda konton eller **Business** för företagskonton och godkänn sedan hos banken.
-6. Lägg in `/mcp`-adressen och anslutningslösenordet från `.mcp-credentials` i Claude eller Codex.
+6. Anslut din MCP-klient med `MCP_URL` och `CONNECTION_PASSWORD` ur `.mcp-credentials`. Se [Ansluta en klient](#ansluta-en-klient).
 
 `.pem`-filen är Enable Banking-appens privata RSA-nyckel och används för att signera API-anrop. Den är inte en bankinloggningsuppgift. Håll den hemlig och lägg den aldrig i Git. Den börjar normalt med `-----BEGIN PRIVATE KEY-----`. Om den börjar med `-----BEGIN RSA PRIVATE KEY-----`, konvertera en kopia till PKCS#8:
 
@@ -87,16 +85,45 @@ npm start
 
 MCP-adressen är `http://127.0.0.1:8787/mcp`. Molnklienter kan inte nå en lokal adress.
 
+## Ansluta en klient
+
+Hämta `MCP_URL` och `CONNECTION_PASSWORD` ur `.mcp-credentials`. Committa aldrig värdena och klistra inte in dem i delade filer.
+
+### Claude (fjärranslutning)
+
+Lägg till `/mcp`-adressen som en custom connector. Servern kör sitt eget OAuth-flöde och öppnar en godkännandesida; ange `CONNECTION_PASSWORD` där.
+
+### Codex CLI
+
+Håll lösenordet i en miljövariabel i stället för i `~/.codex/config.toml`. Att läsa in det interaktivt håller det borta från skalhistoriken:
+
+```bash
+read -s BANKING_MCP_TOKEN
+export BANKING_MCP_TOKEN
+```
+
+Registrera sedan servern:
+
+```bash
+codex mcp add banking --url "<MCP_URL>" --bearer-token-env-var BANKING_MCP_TOKEN
+```
+
+Variabeln måste finnas när Codex startar. Kontrollera med `codex mcp get banking --json` och be sedan Codex anropa `list_accounts`: ett lyckat verktygsanrop är det riktiga beviset, konfigurationskollen visar bara vad som sparats.
+
+### Codex Cloud
+
+Inte dokumenterat än. CLI-konfigurationen ovan konfigurerar inte en molnuppgift, så kopiera den inte till en molnmiljö innan du kontrollerat aktuell officiell Codex-dokumentation för MCP och hemligheter där.
+
 ## Verktyg
 
 | Verktyg | Funktion |
 |---|---|
-| `list_accounts` | Länkade konton och cachade saldon |
-| `get_balances` | Saldon filtrerade efter kontonamn, maskerat IBAN eller bank |
-| `get_transactions` | Cachade bokförda och valfria väntande transaktioner |
-| `refresh_now` | Direkt uppdatering inom bankens/API:ets gränser |
-| `get_auth_status` | Cachad sessionsmetadata, senaste verifierade live-resultat och operatörsinstruktion för förnyelse |
-| `export_statements` | JSON-export från den privata cachen |
+| `list_accounts` | Cachade konton, maskerade IBAN, senaste cachade saldon och senaste synktid |
+| `get_balances` | Cachade saldon, valfritt filtrerade på kontonamn, maskerat IBAN eller bank |
+| `get_transactions` | Upp till 500 cachade transaktioner, väntande ingår som standard, med filter på konto, datum och fritext |
+| `refresh_now` | Direktuppdatering från banken, max 3 per session och UTC-dygn, delat mellan alla anslutna klienter |
+| `get_auth_status` | Cachad sessionsmetadata plus resultatet av senaste verifierade bankanrop. Anropar inte banken och returnerar ingen token eller hemlig länk |
+| `export_statements` | Bulk-JSON-export av cachade bokförda transaktioner sedan ett datum, standard `2025-01-01`, med löpande saldo per rad |
 
 Banklistan hämtas live från Enable Banking. Deras dokumentation beskriver landsspecifikt Open Banking-stöd inom [EU/EES](https://enablebanking.com/docs/markets); tillgängliga länder, banker och stöd för Personal/Business kan ändras.
 

@@ -17,8 +17,6 @@ local path to its downloaded .pem private-key file.
 
 The agent procedure is in [AGENTS.md](AGENTS.md). There is deliberately **no browser setup page**. Installation, secrets, deployment, and verification are handled from the cloned repository.
 
-If the repository is private, the agent must use a GitHub session that can access it.
-
 ## Install manually
 
 Requirements: Node.js 22+ and npm.
@@ -34,7 +32,7 @@ The installer asks first:
 
 | Mode | Use it for |
 |---|---|
-| **Cloud** | Claude.ai, Codex Cloud, phone, or several devices. Recommended. |
+| **Cloud** | Claude.ai and other remote MCP clients, phone, or several devices. Recommended. |
 | **Local** | Claude Code or Codex on one computer. |
 | **Both** | Local and cloud clients sharing the cloud database. |
 
@@ -67,7 +65,7 @@ npm run install:mcp -- --cloud --yes --app-id=<id> --key-file="/path/to/key.pem"
    - For personal, restricted use, activate by linking your own accounts.
 4. Return with only the Application ID and the local path to the downloaded `.pem` file. The installer stores them as encrypted Cloudflare Worker secrets and deploys the configured server.
 5. Open `.mcp-credentials` locally and use its bank link. Choose **Personal** for privately owned accounts or **Business** for company-owned accounts, then approve at your bank.
-6. Add the `/mcp` URL and connection password from `.mcp-credentials` to Claude or Codex.
+6. Connect your MCP client using `MCP_URL` and `CONNECTION_PASSWORD` from `.mcp-credentials`. See [Connecting a client](#connecting-a-client).
 
 The `.pem` file is the Enable Banking application's private RSA key, used to sign API calls. It is not a bank login credential. Keep it secret and never commit it. It normally begins with `-----BEGIN PRIVATE KEY-----`. If it begins with `-----BEGIN RSA PRIVATE KEY-----`, convert a copy to PKCS#8:
 
@@ -87,16 +85,45 @@ npm start
 
 The MCP endpoint is `http://127.0.0.1:8787/mcp`. Cloud clients cannot reach a local address.
 
+## Connecting a client
+
+Take `MCP_URL` and `CONNECTION_PASSWORD` from `.mcp-credentials`. Never commit either value or paste it into a shared file.
+
+### Claude (remote connector)
+
+Add the `/mcp` URL as a custom connector. The server runs its own OAuth flow and opens an approval page; enter `CONNECTION_PASSWORD` there.
+
+### Codex CLI
+
+Keep the password in an environment variable rather than in `~/.codex/config.toml`. Reading it interactively avoids leaving it in your shell history:
+
+```bash
+read -s BANKING_MCP_TOKEN
+export BANKING_MCP_TOKEN
+```
+
+Then register the server:
+
+```bash
+codex mcp add banking --url "<MCP_URL>" --bearer-token-env-var BANKING_MCP_TOKEN
+```
+
+The variable must be set whenever Codex starts. Verify with `codex mcp get banking --json`, then ask Codex to call `list_accounts`: a successful tool call is the real proof, the config check only shows what was saved.
+
+### Codex Cloud
+
+Not documented yet. The CLI configuration above does not by itself configure a cloud task, so do not copy it into a cloud environment before checking the current official Codex documentation for MCP and secret handling there.
+
 ## Tools
 
 | Tool | Purpose |
 |---|---|
-| `list_accounts` | Linked accounts and cached balances |
-| `get_balances` | Balances filtered by account name, masked IBAN, or bank |
-| `get_transactions` | Cached booked and optional pending transactions |
-| `refresh_now` | Live refresh within bank/API limits |
-| `get_auth_status` | Cached session metadata, last verified live-call result, and operator renewal instructions |
-| `export_statements` | JSON export of the private cache |
+| `list_accounts` | Cached accounts, masked IBANs, latest cached balances, and last sync time |
+| `get_balances` | Cached balances, optionally filtered by account name, masked IBAN, or bank |
+| `get_transactions` | Up to 500 cached transactions, pending included by default, with account, date, and text filters |
+| `refresh_now` | Live refresh from the bank, limited to 3 per session per UTC day and shared across all connected clients |
+| `get_auth_status` | Cached session metadata plus the result of the most recent verified bank call. Does not call the bank and returns no token or secret link |
+| `export_statements` | Bulk JSON export of cached booked transactions since a date, default `2025-01-01`, with a running balance per row |
 
 Bank availability is loaded live from Enable Banking. Its documentation covers country-specific Open Banking support across [EU/EEA markets](https://enablebanking.com/docs/markets); available countries, banks, and Personal/Business support can change.
 
