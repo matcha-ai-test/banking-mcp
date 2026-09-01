@@ -1,5 +1,6 @@
 import { Db } from "./db";
 import { EbClient, type Aspsp } from "./eb";
+import { AUTH_LINK_CMD } from "./mcp-output";
 import { authGatePage, esc, pageResponse } from "./pages";
 import { backfillAccounts } from "./sync";
 import type { AccountRow, Env, PsuType } from "./types";
@@ -38,10 +39,13 @@ export async function handleAuthSession(request: Request, env: Env): Promise<Res
   if (typeof presented !== "string" || !(await secretsMatch(presented, env.START_TOKEN))) {
     return new Response("Not found", { status: 404 });
   }
+  // Secure only over https: Safari drops Secure cookies on plain-http loopback,
+  // which would make local mode (http://127.0.0.1:8787) loop on the gate page.
+  const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
   return new Response(null, {
     status: 204,
     headers: {
-      "Set-Cookie": `${AUTH_COOKIE_NAME}=${await mintAuthCookie(env.START_TOKEN!)}; Path=/auth; Max-Age=${Math.floor(AUTH_COOKIE_TTL_MS / 1000)}; HttpOnly; Secure; SameSite=Lax`,
+      "Set-Cookie": `${AUTH_COOKIE_NAME}=${await mintAuthCookie(env.START_TOKEN!)}; Path=/auth; Max-Age=${Math.floor(AUTH_COOKIE_TTL_MS / 1000)}; HttpOnly${secure}; SameSite=Lax`,
       "Cache-Control": "no-store",
       "Referrer-Policy": "no-referrer",
     },
@@ -62,7 +66,7 @@ export async function handleAuthStart(request: Request, env: Env): Promise<Respo
   if (!bankParam) {
     return authPage(
       "No bank specified",
-      "<h1>No bank specified</h1><p>Run <code>npm run auth:link -- --bank=&lt;bank name&gt;</code> on the operator machine and open the link it prints. The name must match Enable Banking's ASPSP name.</p>",
+      `<h1>No bank specified</h1><p>Run <code>${esc(AUTH_LINK_CMD)}</code> on the operator machine and open the link it prints. The name must match Enable Banking's ASPSP name.</p>`,
       400
     );
   }
@@ -71,25 +75,35 @@ export async function handleAuthStart(request: Request, env: Env): Promise<Respo
   if (!(await db.rateLimitOk(await rateLimitKey(request, "auth_start"), AUTH_START_LIMIT_PER_HOUR, 3600_000))) {
     return authPage(
       "Too many attempts",
-      `<h1>Too many attempts</h1><p>Max ${AUTH_START_LIMIT_PER_HOUR} authorisation starts per hour. Try again later.</p>`,
+      `<h1>Too many attempts</h1><p>Max ${AUTH_START_LIMIT_PER_HOUR} authorization starts per hour. Try again later.</p>`,
       429
     );
   }
 
   const eb = new EbClient(env);
-  let aspsps: Aspsp[] = [];
-  if (country) aspsps = await eb.getAspsps(country);
-  if (!aspsps.length) aspsps = await eb.getAspsps();
-  const bank = aspsps.find(
+  const aspsps: Aspsp[] = country ? await eb.getAspsps(country) : await eb.getAspsps();
+  const matches = aspsps.filter(
     (a) => a.name.toLowerCase() === bankParam.toLowerCase() && (!country || a.country.toUpperCase() === country)
   );
-  if (!bank) {
+  if (!matches.length) {
     return authPage(
       "Unknown bank",
-      `<h1>Unknown bank</h1><p><a href="/auth/start">Pick a bank from the list</a>. Enable Banking names must match exactly.</p>`,
+      `<h1>Unknown bank</h1><p><code>${esc(bankParam)}</code>${country ? ` in ${esc(country)}` : ""} is not in Enable Banking's list. The name must match the ASPSP name exactly. Pass <code>--country</code> if you did not.</p>`,
       400
     );
   }
+  // Some providers (PayPal, for one) are listed once per country. Without a
+  // country the first match would win silently and the session would come back
+  // with no accounts, so refuse and ask for the country instead.
+  const countries = [...new Set(matches.map((a) => a.country.toUpperCase()))];
+  if (!country && countries.length > 1) {
+    return authPage(
+      "Bank exists in several countries",
+      `<h1>Bank exists in several countries</h1><p><code>${esc(bankParam)}</code> is listed in ${esc(countries.join(", "))}. Run <code>${esc(AUTH_LINK_CMD)}</code> with the country you hold the account in.</p>`,
+      400
+    );
+  }
+  const bank = matches[0];
   if (bank.psu_types && !bank.psu_types.includes(psuType)) {
     return authPage(
       "Wrong account type",
@@ -125,8 +139,8 @@ export async function handleAuthCallback(request: Request, env: Env): Promise<Re
 
   if (error) {
     return authPage(
-      "Authorisation cancelled",
-      "<h1>Authorisation was cancelled or rejected</h1><p>Restart from <strong>Choose bank</strong> when you want to try again.</p>",
+      "Authorization canceled",
+      `<h1>Authorization was canceled or rejected</h1><p>When you want to try again, run <code>${esc(AUTH_LINK_CMD)}</code> on the operator machine and open the new link.</p>`,
       400
     );
   }
@@ -139,7 +153,7 @@ export async function handleAuthCallback(request: Request, env: Env): Promise<Re
   if (!psuType) {
     return authPage(
       "Expired or already used",
-      "<h1>Expired or already used</h1><p>Open the bank link printed by the installer and choose the bank again.</p>",
+      `<h1>Expired or already used</h1><p>Run <code>${esc(AUTH_LINK_CMD)}</code> on the operator machine and open the new link.</p>`,
       400
     );
   }
@@ -149,18 +163,7 @@ export async function handleAuthCallback(request: Request, env: Env): Promise<Re
     const session = await eb.createSession(code);
     const aspspName = session.aspsp?.name ?? "unknown";
     const aspspCountry = session.aspsp?.country ?? "SE";
-
-    await db.replaceActiveSessions(psuType, aspspName);
-
     const sessionPk = crypto.randomUUID();
-    await db.insertSession({
-      id: sessionPk,
-      session_id: session.session_id,
-      psu_type: psuType,
-      valid_until: session.access?.valid_until ?? null,
-      aspsp_name: aspspName,
-      aspsp_country: aspspCountry,
-    });
 
     const accountRows: AccountRow[] = (session.accounts ?? []).map((a) => ({
       account_uid: a.uid,
@@ -172,6 +175,28 @@ export async function handleAuthCallback(request: Request, env: Env): Promise<Re
       product: a.product ?? null,
       last_synced_at: null,
     }));
+
+    // An authorized session that returns no accounts is not a success: the
+    // account is usually not linked to the app under Enable Banking Restricted
+    // access, or the bank was chosen for the wrong country (PayPal is per
+    // country). Say so, and persist nothing, so a mis-aimed re-authorization
+    // can never replace a working session for the same bank.
+    if (accountRows.length === 0) {
+      return authPage(
+        "Connected, but no accounts",
+        `<h1>Connected, but no accounts</h1><p>${esc(aspspName)} (${psuType}) authorized, but Enable Banking returned no accounts. Link the account to the application in the Enable Banking Control Panel under Restricted access, or re-authorize for the correct country. Any existing session for this bank is unchanged.</p><p>Then run <code>${esc(AUTH_LINK_CMD)}</code> on the operator machine again. PayPal, for example, is listed per country.</p>`
+      );
+    }
+
+    await db.replaceActiveSessions(psuType, aspspName);
+    await db.insertSession({
+      id: sessionPk,
+      session_id: session.session_id,
+      psu_type: psuType,
+      valid_until: session.access?.valid_until ?? null,
+      aspsp_name: aspspName,
+      aspsp_country: aspspCountry,
+    });
     await db.upsertAccounts(accountRows);
 
     // Re-auth mints fresh account_uids for the same IBANs; fold any prior generations into
@@ -181,19 +206,9 @@ export async function handleAuthCallback(request: Request, env: Env): Promise<Re
       const stale = await db.staleAccountGenerations(a.iban, a.currency, a.psu_type, a.account_uid);
       for (const oldUid of stale) {
         const r = await db.foldAccountGeneration(oldUid, a.account_uid);
-        console.log(`folded ${oldUid} -> ${a.account_uid}: moved ${r.moved}, collapsed ${r.collapsed}`);
+        // Counts only: account identifiers do not belong in Worker logs.
+        console.log(`folded account generation: moved ${r.moved}, collapsed ${r.collapsed}`);
       }
-    }
-
-    // An authorized session that returns no accounts is not a success: the
-    // account is usually not linked to the app under Enable Banking Restricted
-    // access, or the bank was chosen for the wrong country (PayPal is per
-    // country). Say so instead of showing a green "Connected" page.
-    if (accountRows.length === 0) {
-      return authPage(
-        "Connected, but no accounts",
-        `<h1>Connected, but no accounts</h1><p>${esc(aspspName)} (${psuType}) authorised, but Enable Banking returned no accounts. Link the account to the application in the Enable Banking Control Panel under Restricted access, or re-authorize for the correct country.</p><p>Then run <code>npm run auth:link -- --bank=&lt;ASPSP name&gt; --country=&lt;ISO&gt;</code> on the operator machine again. PayPal, for example, is listed per country.</p>`
-      );
     }
 
     const results = await backfillAccounts(env, accountRows);

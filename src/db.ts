@@ -130,16 +130,11 @@ export class Db {
     return r.results;
   }
 
-  async accountsBySession(sessionPk: string, accountUid?: string): Promise<AccountRow[]> {
-    if (accountUid) {
-      const r = await this.d1
-        .prepare("SELECT * FROM accounts WHERE session_pk = ? AND account_uid = ?")
-        .bind(sessionPk, accountUid)
-        .all<AccountRow>();
-      return r.results;
-    }
+  async accountsBySession(sessionPk: string, accountUids?: string[]): Promise<AccountRow[]> {
     const r = await this.d1.prepare("SELECT * FROM accounts WHERE session_pk = ?").bind(sessionPk).all<AccountRow>();
-    return r.results;
+    if (!accountUids) return r.results;
+    const wanted = new Set(accountUids);
+    return r.results.filter((a) => wanted.has(a.account_uid));
   }
 
   async upsertAccounts(rows: AccountRow[]): Promise<void> {

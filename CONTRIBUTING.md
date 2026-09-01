@@ -4,7 +4,7 @@ Thanks for your interest in banking-mcp. It is a self-hosted, read-only bank-dat
 
 ## Development
 
-Requirements: Node.js 22.6 or newer and npm.
+Requirements: Node.js 22.15 or newer and npm.
 
 ```bash
 npm ci

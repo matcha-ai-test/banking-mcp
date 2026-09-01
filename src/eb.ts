@@ -41,13 +41,11 @@ export class ExpiredSessionError extends Error {
 
 export interface AuthStartResponse {
   url: string;
-  authorization_id?: string;
 }
 export interface SessionResponse {
   session_id: string;
   accounts: EbAccount[];
   access?: { valid_until?: string };
-  psu_type?: PsuType;
   aspsp?: { name?: string; country?: string };
   [k: string]: unknown;
 }
@@ -116,7 +114,9 @@ export class EbClient {
     if (bodyText.includes("EXPIRED_SESSION") || bodyText.includes("SESSION_EXPIRED")) {
       throw new ExpiredSessionError();
     }
-    if (res.status >= 500 && attempt < 3) {
+    // Retry only idempotent reads: a POST (/auth, /sessions) that succeeded
+    // server-side but answered 5xx must not be replayed with a spent code.
+    if (res.status >= 500 && attempt < 3 && (init.method ?? "GET").toUpperCase() === "GET") {
       await new Promise((r) => setTimeout(r, 500 * 2 ** attempt));
       return this.request<T>(path, init, attempt + 1);
     }
@@ -160,10 +160,6 @@ export class EbClient {
 
   async createSession(code: string): Promise<SessionResponse> {
     return this.request<SessionResponse>("/sessions", { method: "POST", body: JSON.stringify({ code }) });
-  }
-
-  async getSession(sessionId: string): Promise<{ status?: string; access?: { valid_until?: string }; accounts?: string[] }> {
-    return this.request(`/sessions/${encodeURIComponent(sessionId)}`);
   }
 
   async getBalances(accountUid: string): Promise<{ balances: EbBalance[] }> {

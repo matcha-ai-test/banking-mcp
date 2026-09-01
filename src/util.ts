@@ -1,3 +1,5 @@
+import type { AccountRow } from "./types";
+
 export async function sha256Hex(input: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -7,6 +9,35 @@ export async function sha256Hex(input: string): Promise<string> {
 export async function rateLimitKey(request: Request, action: string): Promise<string> {
   const client = request.headers.get("CF-Connecting-IP") ?? "local";
   return `${action}:${(await sha256Hex(client)).slice(0, 16)}`;
+}
+
+/**
+ * Match an account by uid, name, bank, the full IBAN, or its last four digits
+ * (what list_accounts shows). Arbitrary IBAN substrings are deliberately not
+ * matched: a client that only sees a masked IBAN could otherwise reconstruct
+ * it character by character from "No account matches" answers.
+ * Returns null when no filter was given, otherwise the matching uids.
+ */
+export function matchAccountUids(
+  rows: Array<AccountRow & { aspsp_name: string | null }>,
+  account?: string
+): string[] | null {
+  const raw = (account ?? "").trim();
+  if (!raw) return null;
+  const lower = raw.toLowerCase();
+  const digits = lower.replace(/[^a-z0-9]/g, "");
+  const hits = rows.filter((a) => {
+    const iban = (a.iban ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    const ibanHit =
+      iban.length > 0 && digits.length >= 4 && (iban === digits || (digits.length === 4 && iban.endsWith(digits)));
+    return (
+      a.account_uid === raw ||
+      ibanHit ||
+      (a.name ?? "").toLowerCase().includes(lower) ||
+      (a.aspsp_name ?? "").toLowerCase() === lower
+    );
+  });
+  return hits.map((a) => a.account_uid);
 }
 
 /** Keep account identifiers useful without returning the full IBAN by default. */
@@ -81,9 +112,4 @@ export function isoDate(d: Date): string {
 
 export function daysAgo(n: number, from = new Date()): string {
   return isoDate(new Date(from.getTime() - n * 86400_000));
-}
-
-export function daysUntil(iso: string | null | undefined): number | null {
-  if (!iso) return null;
-  return Math.floor((new Date(iso).getTime() - Date.now()) / 86400_000);
 }

@@ -6,7 +6,7 @@
   "description": "Read-only multi-bank MCP server for Claude and Codex via Enable Banking (PSD2 AIS). No bank-side writes or payments.",
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.15"
   },
   "repository": {
     "type": "git",

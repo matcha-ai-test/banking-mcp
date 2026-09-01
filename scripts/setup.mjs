@@ -35,7 +35,8 @@ const optionValue = (name) => process.argv.slice(2).find((arg) => arg.startsWith
 const wantPrint = args.has("--print");
 const nonInteractive = args.has("--yes") || !stdinStream.isTTY;
 const langArg = process.argv.slice(2).find((arg) => arg.startsWith("--lang="))?.slice(7);
-const language = langArg === "sv" || langArg === "en" ? langArg : /^sv/i.test(process.env.LANG || "") ? "sv" : "en";
+// English unless explicitly asked for Swedish; the docs and pages are English-only.
+const language = langArg === "sv" ? "sv" : "en";
 const tr = (en, sv) => (language === "sv" ? sv : en);
 
 const c = {
@@ -107,11 +108,10 @@ function normalizePem(raw) {
   return text;
 }
 
-function persistClientCredentials({ mcpSecret, startToken, localUrl, cloudUrl, mode }) {
+function persistClientCredentials({ mcpSecret, localUrl, cloudUrl, mode }) {
   writeClientCredentials({
     filePath: CREDENTIALS,
     mcpSecret,
-    startToken,
     localUrl,
     cloudUrl,
     mode,
@@ -195,12 +195,11 @@ function configureCloudSecrets(secrets) {
 
 if (wantPrint) {
   const vars = loadDotVars(DEV_VARS);
-  if (!vars.MCP_SECRET || !vars.START_TOKEN) fail("No .dev.vars yet. Run npm run setup first.");
+  if (!vars.MCP_SECRET || !vars.START_TOKEN) fail("No .dev.vars yet. Run npm run install:mcp first.");
   const cloudUrl = vars.CLOUD_URL || "";
   const mode = vars.INSTALL_MODE || (cloudUrl ? "cloud" : "local");
   persistClientCredentials({
     mcpSecret: vars.MCP_SECRET,
-    startToken: vars.START_TOKEN,
     localUrl: vars.BASE_URL || LOCAL_URL,
     cloudUrl,
     mode,
@@ -246,10 +245,11 @@ if (wantCloud) {
   // A new Enable Banking production application needs public callback,
   // privacy and terms URLs before it can issue the Application ID and key.
   // Deploy an unconfigured shell first to break that dependency cycle.
+  // One deploy is enough: the Worker never reads BASE_URL (it uses the request
+  // origin); the value in wrangler.local.jsonc is only read by scripts.
   if (!cloudUrl) {
     cloudUrl = deployWorker();
     writeLocalBaseUrl(ROOT, cloudUrl);
-    cloudUrl = deployWorker();
   }
   printEnableBankingRegistration(cloudUrl);
 }
@@ -258,7 +258,7 @@ console.log(tr("You now need:", "Nu behöver du:"));
 console.log(tr("  1. An Enable Banking Application ID", "  1. Ett Enable Banking Application ID"));
 console.log(tr("  2. Its downloaded private key (.pem)", "  2. Den nedladdade privata nyckeln (.pem)"));
 console.log(tr("  3. The linked accounts activated in Enable Banking", "  3. Dina konton länkade och applikationen aktiverad i Enable Banking"));
-console.log(tr("Linking accounts whitelists them. banking-mcp will still start a separate bank authorisation to create the API session.", "Länkningen vitlistar kontona. banking-mcp startar därefter ändå en separat bankauktorisering för att skapa API-sessionen."));
+console.log(tr("Linking accounts restricts the application to them and activates it. banking-mcp still starts a separate bank authorization to create the API session.", "Länkningen begränsar applikationen till kontona och aktiverar den. banking-mcp startar därefter ändå en separat bankauktorisering för att skapa API-sessionen."));
 console.log("");
 
 let appId = optionValue("--app-id") || process.env.EB_APP_ID || existing.EB_APP_ID || "";
@@ -327,7 +327,7 @@ if (wantCloud) {
   console.log(c.green("✓") + tr(" Cloud deployment completed", " Molnpubliceringen är klar"));
 }
 
-persistClientCredentials({ mcpSecret, startToken, localUrl: LOCAL_URL, cloudUrl, mode });
+persistClientCredentials({ mcpSecret, localUrl: LOCAL_URL, cloudUrl, mode });
 
 if (wantLocal) {
   console.log(c.bold(tr("Start on this computer:", "Starta på den här datorn:")));

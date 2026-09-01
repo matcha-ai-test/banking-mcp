@@ -1,7 +1,8 @@
 import type { AuthStatusSessionRow } from "./types";
 
-export const RENEWAL_HINT =
-  "Run 'npm run auth:link -- --bank=<ASPSP name>' on the operator machine to print a bank re-authorization link.";
+/** The one operator command for connecting or renewing a bank; every hint and page quotes this. */
+export const AUTH_LINK_CMD = "npm run auth:link -- --bank=<ASPSP name> --country=<ISO code> [--psu=business]";
+export const RENEWAL_HINT = `Run '${AUTH_LINK_CMD}' on the operator machine to print a bank re-authorization link.`;
 export const REFRESH_BUDGET_PER_DAY = 3;
 
 const CACHED_NOTE =
@@ -46,10 +47,8 @@ export function buildAuthStatus(sessions: AuthStatusSessionRow[], today = new Da
       refresh_budget_per_day: REFRESH_BUDGET_PER_DAY,
       rate_limit_backoff_until: session.backoff_until,
     })),
-    add_bank:
-      "To connect another bank, first whitelist its accounts in the Enable Banking Control Panel, then run 'npm run auth:link -- --bank=<ASPSP name>' on the operator machine.",
-    add_business:
-      "To add business accounts, run 'npm run auth:link -- --bank=<ASPSP name> --psu=business' on the operator machine and complete the bank login. Accounts must be whitelisted first.",
+    add_bank: `To connect another bank, first link its accounts to the application in the Enable Banking Control Panel (Restricted access), then run '${AUTH_LINK_CMD}' on the operator machine.`,
+    add_business: `To add business accounts, run '${AUTH_LINK_CMD}' with --psu=business on the operator machine and complete the bank login. The accounts must be linked to the application first.`,
   };
 }
 

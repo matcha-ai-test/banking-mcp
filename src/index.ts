@@ -13,8 +13,16 @@ export { BankingMCP };
 
 const mcpHandler = BankingMCP.serve("/mcp", { binding: "MCP_OBJECT" });
 
+// The migration is idempotent, but it is ~11 D1 statements; run it once per
+// isolate rather than on every request. A failed run is forgotten so the next
+// request retries instead of poisoning the isolate.
+let migrated: Promise<void> | null = null;
 async function resolve(env: Env): Promise<Env> {
-  await migrate(env.DB);
+  migrated ??= migrate(env.DB).catch((e) => {
+    migrated = null;
+    throw e;
+  });
+  await migrated;
   return env;
 }
 

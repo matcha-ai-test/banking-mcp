@@ -5,6 +5,7 @@ import { Db } from "./db";
 import { buildStatementExport } from "./export";
 import { migrate } from "./migrate";
 import {
+  AUTH_LINK_CMD,
   buildAuthStatus,
   buildSessionWarnings,
   REFRESH_BUDGET_PER_DAY,
@@ -12,7 +13,7 @@ import {
 } from "./mcp-output";
 import { syncAll } from "./sync";
 import type { Env } from "./types";
-import { maskIban } from "./util";
+import { maskIban, matchAccountUids } from "./util";
 
 function money(cents: number): number {
   return Number((cents / 100).toFixed(2));
@@ -37,18 +38,10 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
     return buildSessionWarnings(sessions);
   }
 
+  /** See matchAccountUids in util.ts; skips the query when no filter was given. */
   private async resolveAccountUids(db: Db, account?: string): Promise<string[] | null> {
-    if (!account) return null;
-    const all = await db.allAccountsWithBank();
-    const needle = account.toLowerCase().replace(/\s/g, "");
-    const hits = all.filter(
-      (a) =>
-        a.account_uid === account ||
-        (a.iban ?? "").toLowerCase().replace(/\s/g, "").includes(needle) ||
-        (a.name ?? "").toLowerCase().includes(account.toLowerCase()) ||
-        (a.aspsp_name ?? "").toLowerCase() === account.toLowerCase()
-    );
-    return hits.map((a) => a.account_uid);
+    if (!(account ?? "").trim()) return null;
+    return matchAccountUids(await db.allAccountsWithBank(), account);
   }
 
   private text(warning: string, data: unknown) {
@@ -89,7 +82,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       "get_balances",
       {
         description:
-          "Get current balances for all accounts, or one account (by name, IBAN or uid). Cached data — use refresh_now first if you need up-to-the-minute figures.",
+          "Get current balances for all accounts, or one account (by name, bank, last four IBAN digits, or uid). Cached data: use refresh_now first if you need up-to-the-minute figures.",
         inputSchema: { account: z.string().optional().describe("Account name, IBAN, uid or bank name. Omit for all accounts.") },
       },
       async ({ account }) => {
@@ -155,7 +148,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
         return this.text(warning, {
           booked: booked.map((r) => mapRow(r)),
           ...(include_pending ? { pending } : {}),
-          note: "Amounts are signed: negative = money out, positive = money in. Cached data — see last_synced_at via list_accounts.",
+          note: "Amounts are signed: negative = money out, positive = money in. Cached data: see last_synced_at via list_accounts.",
         });
       }
     );
@@ -164,7 +157,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       "export_statements",
       {
         description:
-          "Bulk JSON export of ALL cached booked transactions for one account (or one bank) since a date, with a computed running balance per row. Reads only the cache — does not call the bank. Use get_transactions for interactive questions.",
+          "Bulk JSON export of ALL cached booked transactions for one account (or one bank) since a date, with a computed running balance per row. Reads only the cache and does not call the bank. Use get_transactions for interactive questions.",
         inputSchema: {
           account: z.string().optional().describe("Account name, IBAN or uid. Omit for all accounts in the bank."),
           bank: z.string().optional().describe("ASPSP name (exact Enable Banking name). Omit for every linked bank."),
@@ -198,32 +191,43 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
         const sessions = await db.activeSessions();
         if (sessions.length === 0) {
           return this.text(await this.warnings(db), {
-            error: "No active bank session. Ask the operator to run 'npm run auth:link' on the operator machine.",
+            error: `No active bank session. Ask the operator to run '${AUTH_LINK_CMD}' on the operator machine.`,
           });
+        }
+
+        // With an account filter, only the sessions that own a matching account
+        // are refreshed; the others keep their daily budget and get no hint.
+        const ownedBySession = new Map<string, string[]>();
+        if (uids !== null) {
+          for (const a of await db.allAccountsWithBank()) {
+            if (!uids.includes(a.account_uid)) continue;
+            ownedBySession.set(a.session_pk, [...(ownedBySession.get(a.session_pk) ?? []), a.account_uid]);
+          }
         }
 
         const results = [];
         for (const s of sessions) {
+          const sessionUids = uids === null ? undefined : (ownedBySession.get(s.id) ?? []);
+          if (sessionUids && sessionUids.length === 0) continue;
+
           const count = s.refresh_count_date === today ? s.refresh_count_today : 0;
           if (count >= REFRESH_BUDGET_PER_DAY) {
             results.push({
               session: `${s.aspsp_name}/${s.psu_type}`,
-              skipped: `Daily refresh budget (${REFRESH_BUDGET_PER_DAY}) used — serving cached data. Budget resets at midnight UTC.`,
+              skipped: `Daily refresh budget (${REFRESH_BUDGET_PER_DAY}) used; serving cached data. Budget resets at midnight UTC.`,
             });
             continue;
           }
           await db.bumpRefreshCount(s.id, count + 1, today);
-          const summary = await syncAll(this.cfg, "refresh_now", {
-            sessionPk: s.id,
-            accountUid: uids?.length === 1 ? uids[0] : undefined,
-          });
-          // An active session that syncs zero accounts is not success: the
-          // account is usually not linked to the app in the Enable Banking
-          // Control Panel, or the bank was authorized for the wrong country.
+          const summary = await syncAll(this.cfg, "refresh_now", { sessionPk: s.id, accountUids: sessionUids });
+          // An unfiltered refresh of an active session that owns no accounts is
+          // not success: the account is usually not linked to the app in the
+          // Enable Banking Control Panel, or the bank was authorized for the
+          // wrong country.
           const emptyHint =
-            summary.accounts_synced === 0 && summary.errors.length === 0
+            !sessionUids && summary.accounts_synced === 0 && summary.errors.length === 0
               ? {
-                  hint: "No accounts synced for this session. Link the account to the application in the Enable Banking Control Panel (Restricted access), or re-authorize with the correct country (PayPal, for example, is per country): 'npm run auth:link -- --bank=<ASPSP name> --country=<ISO>'.",
+                  hint: `No accounts synced for this session. Link the account to the application in the Enable Banking Control Panel (Restricted access), or re-authorize with the correct country (PayPal, for example, is per country): '${AUTH_LINK_CMD}'.`,
                 }
               : {};
           results.push({

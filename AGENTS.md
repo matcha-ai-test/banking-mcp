@@ -5,7 +5,7 @@ Use this procedure when a user asks you to install this repository as an MCP ser
 ## Required interaction
 
 1. If the user has not already chosen, ask exactly one question before changing anything: **Cloud, Local, or Both?** Recommend Cloud for Claude.ai, other remote HTTP MCP clients, phones, or several devices. Do not promise Codex Cloud support; its MCP setup is not documented here.
-2. Inspect `README.md`, `package.json`, `wrangler.jsonc`, and `scripts/setup.mjs`. Check Node.js is version 22.6 or newer.
+2. Inspect `README.md`, `package.json`, `wrangler.jsonc`, and `scripts/setup.mjs`. Check Node.js is version 22.15 or newer.
 3. Install the locked dependencies with `npm ci`. Run `npm audit` and `npm run typecheck`; report a blocker before continuing if either reveals a material security or build failure.
 4. Run `npm run install:mcp` with `--cloud`, `--local`, or `--both`. Always pass the flag: without one the installer asks in the terminal, but when there is no TTY it silently chooses Local.
 5. Cloudflare authentication is interactive. Check with `npx wrangler whoami`; if needed, run `npx wrangler login` and let the user finish sign-in, verification, CAPTCHA, and two-factor authentication in the browser. Never ask the user to paste a Cloudflare password or session token into chat.

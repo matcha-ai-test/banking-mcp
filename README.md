@@ -7,7 +7,7 @@ Private, read-only bank access for [Claude](https://claude.ai) and [Codex](https
 
 ## Requirements
 
-- Node.js 22.6 or newer (the tests use `node:sqlite` and `--experimental-strip-types`) and npm.
+- Node.js 22.15 or newer (the tests use `node:sqlite`, `--experimental-strip-types`, and `node:module` hooks) and npm.
 - A Cloudflare account with a registered `workers.dev` subdomain. New accounts do not have one; set it under **Workers & Pages** in the Cloudflare dashboard first, otherwise the deploy succeeds but no public URL exists. Not needed for Local mode.
 - An Enable Banking account with access to the [Control Panel](https://enablebanking.com/cp/applications).
 - A bank on Enable Banking's [supported list](https://enablebanking.com/docs/markets).

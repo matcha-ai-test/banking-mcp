@@ -128,7 +128,7 @@ export interface SyncSummary {
 export async function syncAll(
   env: Env,
   trigger: string,
-  filter: { sessionPk?: string; accountUid?: string } = {}
+  filter: { sessionPk?: string; accountUids?: string[] } = {}
 ): Promise<SyncSummary> {
   const db = new Db(env);
   const eb = new EbClient(env);
@@ -145,7 +145,7 @@ export async function syncAll(
     }
     summary.sessions++;
 
-    const accounts = await db.accountsBySession(session.id, filter.accountUid);
+    const accounts = await db.accountsBySession(session.id, filter.accountUids);
 
     for (const account of accounts) {
       try {
@@ -160,7 +160,7 @@ export async function syncAll(
         }
         if (e instanceof ExpiredSessionError) {
           await db.setSessionExpired(session.id);
-          summary.errors.push(`session ${session.psu_type}: expired — reauthorization required`);
+          summary.errors.push(`session ${session.psu_type}: expired; reauthorization required`);
           break;
         }
         summary.errors.push(`account sync failed (${(e as Error).name || "Error"})`);
