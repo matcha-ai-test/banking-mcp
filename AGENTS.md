@@ -16,21 +16,27 @@ Use this procedure when a user asks you to install this repository as an MCP ser
 
    Do not ask for bank username, password, BankID data, account numbers, or unrelated personal information. Never print the private key, commit it, or upload it anywhere except as the intended encrypted Worker secret.
 8. Resume after the user has registered the Enable Banking application and linked the accounts allowed for Restricted access. In a non-interactive agent terminal, use `npm run install:mcp -- --cloud --yes --app-id=<id> --key-file=<local-path>` (or the selected mode). The script reads the key file directly; never paste its contents into the command or chat.
-9. Tell the user to open `BANK_LINK` from `.mcp-credentials` on their own machine. That link carries the operator token: never print, quote, or paste it into chat. The user chooses Personal or Business and completes bank authorisation in the bank's own browser flow.
+9. To connect a bank, have the user run `npm run auth:link -- --bank=<ASPSP name>` on the operator machine (add `--psu=business` for company accounts, and `--country=<ISO>` — some providers, such as PayPal, are listed per country). The printed link carries the operator token in its fragment: never print, quote, or paste it into chat. The user opens it and completes bank authorisation in the bank's own browser flow. The bank must already be linked to the application under Enable Banking Restricted access, or the session returns with no accounts.
 10. Configure the requesting MCP client only if the user asked you to do so. Use `MCP_URL` and `CONNECTION_PASSWORD` from `.mcp-credentials` (setup prints only the file path, never the values); do not commit either.
+
+## Remote or cloud agents
+
+If you run in a hosted sandbox rather than on the user's own computer, the operator cannot open the files you create. `setup` writes the MCP URL and connection password to `.mcp-credentials` and prints only its path, which the user cannot reach from your sandbox. Do not resolve this by pasting the connection password, bank link, or any token into chat.
+
+The safe path is for the user to run `setup` and `auth:link` themselves on their own machine, or in a terminal whose output they can read, and to copy the connection password from there into their MCP client. If you cannot deliver the connection details without exposing them, say so plainly and stop, rather than leaking them.
 
 ## Verification
 
 - Run `npm run typecheck` and `npx wrangler deploy --dry-run`.
 - Cloud: confirm `/` returns 200, `/privacy` and `/terms` return 200, and `/setup` returns 404. Never expect a browser setup form.
 - Before credentials are installed, `/mcp` should return 503. After installation, verify an MCP `initialize` request succeeds with the generated bearer credential without exposing it in logs.
-- Confirm the bank-link page lists providers and distinguishes Personal from Business. The user must complete bank approval.
+- Confirm `/auth/start` without a named bank returns a "name the bank" page; there is no in-app provider browser. The operator names the bank with `auth:link --bank`, and the user completes bank approval. A session that authorises but returns no accounts means the account is not linked under Restricted access, or the wrong country was used.
 
 ## Safety boundaries
 
 - Make no destructive changes and do not rewrite Git history.
 - Do not manually edit, display, or commit `.dev.vars`, `.mcp-credentials`, `.pem`, `.key`, or generated credentials. The installer may create or update them as part of the selected mode.
-- Treat `.mcp-credentials`, `CONNECTION_PASSWORD`, `BANK_LINK`, `MCP_SECRET`, and `START_TOKEN` as secrets. Never reproduce their values, or URLs containing them, in chat, logs, issues, commits, or pull requests.
+- Treat `.mcp-credentials`, `CONNECTION_PASSWORD`, the `auth:link` output, `MCP_SECRET`, and `START_TOKEN` as secrets. Never reproduce their values, or URLs containing them, in chat, logs, issues, commits, or pull requests.
 - Use Cloudflare Worker secrets for cloud credentials. Do not store application secrets in D1.
 - This server is account-information only. Do not add bank-side write, transfer, beneficiary, or payment functionality as part of installation.
 - If access, authentication, credentials, or user approval is missing, stop at that exact point and ask only for what is missing.

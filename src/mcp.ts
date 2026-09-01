@@ -217,7 +217,21 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
             sessionPk: s.id,
             accountUid: uids?.length === 1 ? uids[0] : undefined,
           });
-          results.push({ session: `${s.aspsp_name}/${s.psu_type}`, ...summary, budget_left_today: REFRESH_BUDGET_PER_DAY - count - 1 });
+          // An active session that syncs zero accounts is not success: the
+          // account is usually not linked to the app in the Enable Banking
+          // Control Panel, or the bank was authorized for the wrong country.
+          const emptyHint =
+            summary.accounts_synced === 0 && summary.errors.length === 0
+              ? {
+                  hint: "No accounts synced for this session. Link the account to the application in the Enable Banking Control Panel (Restricted access), or re-authorize with the correct country (PayPal, for example, is per country): 'npm run auth:link -- --bank=<ASPSP name> --country=<ISO>'.",
+                }
+              : {};
+          results.push({
+            session: `${s.aspsp_name}/${s.psu_type}`,
+            ...summary,
+            budget_left_today: REFRESH_BUDGET_PER_DAY - count - 1,
+            ...emptyHint,
+          });
         }
         return this.text(await this.warnings(db), results);
       }

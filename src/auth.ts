@@ -185,6 +185,17 @@ export async function handleAuthCallback(request: Request, env: Env): Promise<Re
       }
     }
 
+    // An authorized session that returns no accounts is not a success: the
+    // account is usually not linked to the app under Enable Banking Restricted
+    // access, or the bank was chosen for the wrong country (PayPal is per
+    // country). Say so instead of showing a green "Connected" page.
+    if (accountRows.length === 0) {
+      return authPage(
+        "Connected, but no accounts",
+        `<h1>Connected, but no accounts</h1><p>${esc(aspspName)} (${psuType}) authorised, but Enable Banking returned no accounts. Link the account to the application in the Enable Banking Control Panel under Restricted access, or re-authorize for the correct country.</p><p>Then run <code>npm run auth:link -- --bank=&lt;ASPSP name&gt; --country=&lt;ISO&gt;</code> on the operator machine again. PayPal, for example, is listed per country.</p>`
+      );
+    }
+
     const results = await backfillAccounts(env, accountRows);
     const total = results.reduce((s, r) => s + r.new_transactions, 0);
     const lines = results
