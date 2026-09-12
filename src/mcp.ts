@@ -15,6 +15,17 @@ import { syncAll } from "./sync";
 import type { Env } from "./types";
 import { maskIban, matchAccountUids } from "./util";
 
+/** Guides clients through cached reads, budgeted refreshes, and operator-controlled renewal. */
+const SERVER_INSTRUCTIONS = `banking-mcp is a read-only mirror of the operator's bank accounts (Enable Banking, PSD2). Every tool reads a local cache filled by a nightly sync. Nothing here moves money or writes to a bank.
+
+Normal order: list_accounts to resolve accounts, then get_balances or get_transactions, then export_statements for bulk history. Account uids change after every re-authorization: always match on account name or IBAN, never on a hardcoded uid.
+
+refresh_now is the only tool that calls the bank. It is budgeted: 3 per bank per UTC day, because banks allow roughly 4 unattended fetches a day and the nightly sync reserves one. A failed attempt can still consume budget. Never call refresh_now to test connectivity.
+
+get_auth_status returns cached session metadata plus the last verified live call. Cached status can read active while the bank session has in fact expired; last_live_* is the authority. Use get_auth_status, not refresh_now, to check whether the connection is healthy.
+
+Bank consent lasts at most 180 days and only the operator can renew it from their own machine. If a tool reports an expired session, tell the user; do not attempt re-authorization.`;
+
 function money(cents: number): number {
   return Number((cents / 100).toFixed(2));
 }
@@ -24,7 +35,7 @@ function signed(cents: number, creditDebit: string): number {
 }
 
 export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<string, never>> {
-  server = new McpServer({ name: "banking-mcp", version: "1.0.0" });
+  server = new McpServer({ name: "banking-mcp", version: "1.0.0" }, { instructions: SERVER_INSTRUCTIONS });
   /** Worker bindings and encrypted secrets supplied by Wrangler. */
   private cfg!: Env;
 
@@ -56,7 +67,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       "list_accounts",
       {
         description:
-          "List all linked bank accounts with their latest known balances and last sync time. Data comes from the local cache (synced nightly + on refresh_now).",
+          "List linked accounts, latest known balances, and last sync time from the local cache. Use first to resolve account names and IBANs because uids rotate after re-authorization. No bank call or refresh-budget cost.",
         inputSchema: {},
       },
       async () => {
@@ -82,7 +93,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       "get_balances",
       {
         description:
-          "Get current balances for all accounts, or one account (by name, bank, last four IBAN digits, or uid). Cached data: use refresh_now first if you need up-to-the-minute figures.",
+          "Get latest cached balances for all accounts or matching accounts. Use for balance questions after resolving accounts with list_accounts. The account filter accepts name, IBAN, last-4, uid, or bank name. No bank call or refresh-budget cost.",
         inputSchema: { account: z.string().optional().describe("Account name, IBAN, uid or bank name. Omit for all accounts.") },
       },
       async ({ account }) => {
@@ -109,7 +120,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       "get_transactions",
       {
         description:
-          "Get booked transactions from the local cache, newest first. Filter by account (name/IBAN/uid/bank), date range, free-text search and limit. Set include_pending to also return not-yet-booked transactions.",
+          "Get cached booked transactions, newest first, and pending transactions when include_pending is true. Use for interactive transaction questions; supports date range, free-text search, and limit. The account filter accepts name, IBAN, last-4, uid, or bank name. No bank call or refresh-budget cost.",
         inputSchema: {
           account: z.string().optional().describe("Account name, IBAN, uid or bank name. Omit for all accounts."),
           date_from: z.string().optional().describe("YYYY-MM-DD (inclusive)"),
@@ -157,7 +168,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       "export_statements",
       {
         description:
-          "Bulk JSON export of ALL cached booked transactions for one account (or one bank) since a date, with a computed running balance per row. Reads only the cache and does not call the bank. Use get_transactions for interactive questions.",
+          "Bulk JSON export of all cached booked transactions for matching accounts since a date, with computed running balances. Use for bulk history; output is large. Cache-only: no bank call or refresh-budget cost. Not for interactive questions; use get_transactions for those.",
         inputSchema: {
           account: z.string().optional().describe("Account name, IBAN or uid. Omit for all accounts in the bank."),
           bank: z.string().optional().describe("ASPSP name (exact Enable Banking name). Omit for every linked bank."),
@@ -179,7 +190,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       "refresh_now",
       {
         description:
-          "Fetch fresh data live from the bank (via Enable Banking) and update the cache. Budgeted: max 3 refreshes per session per day (banks typically allow ~4 unattended fetches/day; 1 is reserved for the nightly sync). Optional account filter.",
+          "Fetch fresh bank data via Enable Banking and update the local cache; this is the ONLY tool that calls the bank. Use only when fresh data is needed, never as a connectivity test. Budget: 3 per bank per UTC day; a failed attempt can still count. Supports an optional account filter.",
         inputSchema: { account: z.string().optional().describe("Account name, IBAN, uid or bank name. Omit for all accounts.") },
       },
       async ({ account }) => {
@@ -245,7 +256,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       "get_auth_status",
       {
         description:
-          "Show cached bank session metadata, the most recent verified live-call result, refresh budget, and operator-only renewal instructions.",
+          "Read cached session metadata, refresh budget, and the last verified live call. Use to diagnose connection health without a bank call or refresh-budget cost. Cached status may say active when the bank session is expired; last_live_* is authoritative. Renewal is operator-only, from their own machine.",
         inputSchema: {},
       },
       async () => {
