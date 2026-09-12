@@ -1,4 +1,5 @@
 import type { AuthStatusSessionRow } from "./types";
+import type { LiveSessionResult } from "./auth-status";
 
 /** The one operator command for connecting or renewing a bank; every hint and page quotes this. */
 export const AUTH_LINK_CMD = "npm run auth:link -- --bank=<ASPSP name> --country=<ISO code> [--psu=business]";
@@ -28,17 +29,28 @@ export function buildSessionWarnings(sessions: AuthStatusSessionRow[], nowMs = D
 }
 
 /** Build the cached auth-status payload. Unknown properties are deliberately not copied. */
-export function buildAuthStatus(sessions: AuthStatusSessionRow[], today = new Date().toISOString().slice(0, 10)) {
+export function buildAuthStatus(
+  sessions: AuthStatusSessionRow[],
+  today = new Date().toISOString().slice(0, 10),
+  liveResults?: LiveSessionResult[]
+) {
   return {
     note: CACHED_NOTE,
     renewal: RENEWAL_HINT,
-    sessions: sessions.map((session) => ({
+    sessions: sessions.map((session, index) => ({
       bank: session.aspsp_name,
       country: session.aspsp_country,
       psu_type: session.psu_type,
       cached: true as const,
       cached_status: session.status,
       cached_valid_until: session.valid_until,
+      ...(liveResults?.[index] ? {
+        live_status: liveResults[index].live_status,
+        live_valid_until: liveResults[index].live_valid_until,
+        live_cached: liveResults[index].live_cached,
+        live_error: liveResults[index].live_error,
+        live_verified_at: liveResults[index].live_verified_at,
+      } : {}),
       days_left_from_cached_valid_until: daysUntil(session.valid_until),
       last_live_verified_at: session.last_live_verified_at,
       last_live_result: session.last_live_result,

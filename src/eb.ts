@@ -95,7 +95,7 @@ export class EbClient {
     return this.jwt;
   }
 
-  private async request<T>(path: string, init: RequestInit = {}, attempt = 0): Promise<T> {
+  private async request<T>(path: string, init: RequestInit = {}, options: { retry?: boolean } = {}, attempt = 0): Promise<T> {
     const token = await this.token();
     const res = await fetch(`${EB_BASE}${path}`, {
       ...init,
@@ -116,9 +116,9 @@ export class EbClient {
     }
     // Retry only idempotent reads: a POST (/auth, /sessions) that succeeded
     // server-side but answered 5xx must not be replayed with a spent code.
-    if (res.status >= 500 && attempt < 3 && (init.method ?? "GET").toUpperCase() === "GET") {
+    if (options.retry !== false && res.status >= 500 && attempt < 3 && (init.method ?? "GET").toUpperCase() === "GET") {
       await new Promise((r) => setTimeout(r, 500 * 2 ** attempt));
-      return this.request<T>(path, init, attempt + 1);
+      return this.request<T>(path, init, options, attempt + 1);
     }
     throw new Error(`Enable Banking request failed (${res.status})`);
   }
@@ -162,18 +162,23 @@ export class EbClient {
     return this.request<SessionResponse>("/sessions", { method: "POST", body: JSON.stringify({ code }) });
   }
 
+  async getSession(sessionId: string): Promise<{ status?: string; access?: { valid_until?: string }; accounts?: string[] }> {
+    return this.request(`/sessions/${encodeURIComponent(sessionId)}`, {}, { retry: false });
+  }
+
   async getBalances(accountUid: string): Promise<{ balances: EbBalance[] }> {
     return this.request(`/accounts/${encodeURIComponent(accountUid)}/balances`);
   }
 
   async getTransactions(
     accountUid: string,
-    opts: { dateFrom?: string; dateTo?: string; continuationKey?: string } = {}
+    opts: { dateFrom?: string; dateTo?: string; continuationKey?: string; strategy?: "default" | "longest" } = {}
   ): Promise<TransactionsResponse> {
     const q = new URLSearchParams();
     if (opts.dateFrom) q.set("date_from", opts.dateFrom);
     if (opts.dateTo) q.set("date_to", opts.dateTo);
     if (opts.continuationKey) q.set("continuation_key", opts.continuationKey);
+    if (opts.strategy) q.set("strategy", opts.strategy);
     const qs = q.toString();
     return this.request(`/accounts/${encodeURIComponent(accountUid)}/transactions${qs ? `?${qs}` : ""}`);
   }

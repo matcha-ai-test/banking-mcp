@@ -12,6 +12,8 @@ CREATE TABLE IF NOT EXISTS eb_sessions (
   backoff_until TEXT,
   last_live_verified_at TEXT,
   last_live_result TEXT,
+  live_verify_claimed_at TEXT NULL,
+  live_verify_result TEXT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

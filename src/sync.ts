@@ -45,13 +45,14 @@ async function fetchWindow(
   db: Db,
   eb: EbClient,
   account: AccountRow,
-  dateFrom: string
+  dateFrom: string,
+  strategy?: "default" | "longest"
 ): Promise<{ booked: EbTransaction[]; pending: EbTransaction[] }> {
   const booked: EbTransaction[] = [];
   const pending: EbTransaction[] = [];
   let continuationKey: string | undefined;
   for (let page = 0; page < MAX_PAGES_PER_ACCOUNT; page++) {
-    const res = await eb.getTransactions(account.account_uid, { dateFrom, continuationKey });
+    const res = await eb.getTransactions(account.account_uid, { dateFrom, continuationKey, strategy });
     await db.setSessionLiveOk(account.session_pk);
     for (const t of res.transactions ?? []) {
       if ((t.status ?? "BOOK") === "BOOK") booked.push(t);
@@ -75,13 +76,13 @@ export async function syncAccount(
   db: Db,
   eb: EbClient,
   account: AccountRow,
-  opts: { dateFrom?: string } = {}
+  opts: { dateFrom?: string; strategy?: "default" | "longest" } = {}
 ): Promise<AccountSyncResult> {
   const dateFrom =
     opts.dateFrom ??
     (account.last_synced_at ? daysAgo(OVERLAP_DAYS, new Date(account.last_synced_at + "Z")) : daysAgo(90));
 
-  const { booked, pending } = await fetchWindow(db, eb, account, dateFrom);
+  const { booked, pending } = await fetchWindow(db, eb, account, dateFrom, opts.strategy);
 
   let inserted = 0;
   if (booked.length > 0) {
@@ -128,7 +129,7 @@ export interface SyncSummary {
 export async function syncAll(
   env: Env,
   trigger: string,
-  filter: { sessionPk?: string; accountUids?: string[] } = {}
+  filter: { sessionPk?: string; accountUids?: string[]; strategy?: "default" | "longest" } = {}
 ): Promise<SyncSummary> {
   const db = new Db(env);
   const eb = new EbClient(env);
@@ -149,7 +150,7 @@ export async function syncAll(
 
     for (const account of accounts) {
       try {
-        const r = await syncAccount(db, eb, account);
+        const r = await syncAccount(db, eb, account, { strategy: filter.strategy });
         summary.accounts_synced++;
         summary.new_transactions += r.new_transactions;
       } catch (e) {

@@ -21,11 +21,13 @@ export interface EbSessionRow {
   backoff_until: string | null;
   last_live_verified_at: string | null;
   last_live_result: string | null;
+  live_verify_claimed_at: string | null;
+  live_verify_result: string | null;
   updated_at: string;
 }
 
 /** Session columns safe to feed the MCP output layer: no id, no session_id. */
-export type AuthStatusSessionRow = Omit<EbSessionRow, "id" | "session_id">;
+export type AuthStatusSessionRow = Omit<EbSessionRow, "id" | "session_id" | "live_verify_claimed_at" | "live_verify_result">;
 
 export interface AccountRow {
   account_uid: string;

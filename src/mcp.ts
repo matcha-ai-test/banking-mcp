@@ -2,6 +2,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpAgent } from "agents/mcp";
 import { z } from "zod";
 import { Db } from "./db";
+import { EbClient } from "./eb";
+import { readAuthStatus } from "./auth-status";
 import { buildStatementExport } from "./export";
 import { migrate } from "./migrate";
 import {
@@ -16,13 +18,13 @@ import type { Env } from "./types";
 import { maskIban, matchAccountUids } from "./util";
 
 /** Guides clients through cached reads, budgeted refreshes, and operator-controlled renewal. */
-const SERVER_INSTRUCTIONS = `banking-mcp is a read-only mirror of the operator's bank accounts (Enable Banking, PSD2). Every tool reads a local cache filled by a nightly sync. Nothing here moves money or writes to a bank.
+const SERVER_INSTRUCTIONS = `banking-mcp is a read-only mirror of the operator's bank accounts (Enable Banking, PSD2). Tools read a local cache filled by a nightly sync unless a live call is explicitly requested. Nothing here moves money or writes to a bank.
 
 Normal order: list_accounts to resolve accounts, then get_balances or get_transactions, then export_statements for bulk history. Account uids change after every re-authorization: always match on account name or IBAN, never on a hardcoded uid.
 
-refresh_now is the only tool that calls the bank. It is budgeted: 3 per bank per UTC day, because banks allow roughly 4 unattended fetches a day and the nightly sync reserves one. A failed attempt can still consume budget. Never call refresh_now to test connectivity.
+refresh_now fetches transactions and balances from the bank. It is budgeted: 3 per bank per UTC day, because banks allow roughly 4 unattended fetches a day and the nightly sync reserves one. A failed attempt can still consume budget. Never call refresh_now to test connectivity.
 
-get_auth_status returns cached session metadata plus the last verified live call. Cached status can read active while the bank session has in fact expired; last_live_* is the authority. Use get_auth_status, not refresh_now, to check whether the connection is healthy.
+get_auth_status returns cached session metadata plus the last verified live call by default. Set verify=true to check stored sessions via Enable Banking, with a 15-minute server-side cooldown; live_cached=true means the stored verification result was reused. Verification does not refresh account data; its upstream budget cost is undocumented. Cached status can read active while the bank session has in fact expired; last_live_* is the authority. Use get_auth_status, not refresh_now, to check whether the connection is healthy.
 
 Bank consent lasts at most 180 days and only the operator can renew it from their own machine. If a tool reports an expired session, tell the user; do not attempt re-authorization.`;
 
@@ -190,10 +192,13 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       "refresh_now",
       {
         description:
-          "Fetch fresh bank data via Enable Banking and update the local cache; this is the ONLY tool that calls the bank. Use only when fresh data is needed, never as a connectivity test. Budget: 3 per bank per UTC day; a failed attempt can still count. Supports an optional account filter.",
-        inputSchema: { account: z.string().optional().describe("Account name, IBAN, uid or bank name. Omit for all accounts.") },
+          "Fetch fresh bank data via Enable Banking and update the local cache; this fetches transactions and balances. Use only when fresh data is needed, never as a connectivity test. Budget: 3 per bank per UTC day; a failed attempt can still count. Supports an optional account filter.",
+        inputSchema: {
+          account: z.string().optional().describe("Account name, IBAN, uid or bank name. Omit for all accounts."),
+          strategy: z.enum(["default", "longest"]).optional().describe('"longest" asks the bank for the deepest available history (use once after a re-authorization for backfill); omit for normal refreshes.'),
+        },
       },
-      async ({ account }) => {
+      async ({ account, strategy }) => {
         const db = this.db();
         const uids = await this.resolveAccountUids(db, account);
         if (uids !== null && uids.length === 0) return this.text("", { error: `No account matches "${account}"` });
@@ -230,7 +235,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
             continue;
           }
           await db.bumpRefreshCount(s.id, count + 1, today);
-          const summary = await syncAll(this.cfg, "refresh_now", { sessionPk: s.id, accountUids: sessionUids });
+          const summary = await syncAll(this.cfg, "refresh_now", { sessionPk: s.id, accountUids: sessionUids, strategy });
           // An unfiltered refresh of an active session that owns no accounts is
           // not success: the account is usually not linked to the app in the
           // Enable Banking Control Panel, or the bank was authorized for the
@@ -256,13 +261,15 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       "get_auth_status",
       {
         description:
-          "Read cached session metadata, refresh budget, and the last verified live call. Use to diagnose connection health without a bank call or refresh-budget cost. Cached status may say active when the bank session is expired; last_live_* is authoritative. Renewal is operator-only, from their own machine.",
-        inputSchema: {},
+          "Read cached session metadata, refresh budget, and the last verified live call. Default verify=false makes no bank call. Set verify=true to check each stored session via Enable Banking; results are cached for 15 minutes (live_cached=true). Verification does not refresh account data; its upstream budget cost is undocumented. Cached status may say active when the bank session is expired; last_live_* is authoritative. Renewal is operator-only, from their own machine.",
+        inputSchema: {
+          verify: z.boolean().optional().default(false).describe("Verify stored sessions live, subject to a 15-minute cooldown. Omit for cached metadata only."),
+        },
       },
-      async () => {
+      async ({ verify }) => {
         const db = this.db();
-        const sessions = await db.allSessions(10);
-        return this.text("", buildAuthStatus(sessions));
+        const { sessions, liveResults } = await readAuthStatus(db, () => new EbClient(this.cfg), verify);
+        return this.text("", buildAuthStatus(sessions, undefined, liveResults));
       }
     );
 

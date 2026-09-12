@@ -42,6 +42,31 @@ export class Db {
     return r.results;
   }
 
+  /** Internal verification only: strip identifiers before passing rows to the output builder. */
+  async sessionsForVerification(id?: string): Promise<EbSessionRow[]> {
+    const query = id === undefined
+      ? this.d1.prepare("SELECT * FROM eb_sessions ORDER BY updated_at DESC")
+      : this.d1.prepare("SELECT * FROM eb_sessions WHERE id = ?").bind(id);
+    return (await query.all<EbSessionRow>()).results;
+  }
+
+  /** Reserve the cooldown atomically so overlapping callers cannot both hit the bank. */
+  async claimSessionVerification(id: string, verifiedAt: string, cutoff: string, pendingResult: string): Promise<boolean> {
+    const result = await this.d1.prepare(
+      `UPDATE eb_sessions SET live_verify_claimed_at = ?, live_verify_result = ?
+       WHERE id = ? AND (live_verify_claimed_at IS NULL
+         OR julianday(live_verify_claimed_at) <= julianday(?))`
+    ).bind(verifiedAt, pendingResult, id, cutoff).run();
+    return result.meta.changes > 0;
+  }
+
+  async setSessionVerificationResult(id: string, verifiedAt: string, result: string): Promise<void> {
+    // Only the current claim may complete; an older request cannot overwrite a newer claim.
+    await this.d1.prepare(
+      "UPDATE eb_sessions SET live_verify_result = ? WHERE id = ? AND live_verify_claimed_at = ?"
+    ).bind(result, id, verifiedAt).run();
+  }
+
   async insertSession(row: {
     id: string;
     session_id: string;

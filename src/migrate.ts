@@ -14,6 +14,8 @@ const STATEMENTS = [
     backoff_until TEXT,
     last_live_verified_at TEXT,
     last_live_result TEXT,
+    live_verify_claimed_at TEXT NULL,
+    live_verify_result TEXT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`,
@@ -93,6 +95,8 @@ const STATEMENTS = [
 const ADDITIVE_STATEMENTS = [
   "ALTER TABLE eb_sessions ADD COLUMN last_live_verified_at TEXT",
   "ALTER TABLE eb_sessions ADD COLUMN last_live_result TEXT",
+  "ALTER TABLE eb_sessions ADD COLUMN live_verify_claimed_at TEXT NULL",
+  "ALTER TABLE eb_sessions ADD COLUMN live_verify_result TEXT NULL",
 ];
 
 function isDuplicateColumnError(error: unknown): boolean {
