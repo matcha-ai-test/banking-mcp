@@ -43,6 +43,8 @@ const STATEMENTS = [
     entry_reference TEXT,
     dedup_key TEXT NOT NULL,
     raw TEXT,
+    detail_fetched_at TEXT,
+    detail_claimed_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (account_uid, dedup_key)
   )`,
@@ -93,6 +95,8 @@ const STATEMENTS = [
 ];
 
 const ADDITIVE_STATEMENTS = [
+  "ALTER TABLE transactions ADD COLUMN detail_fetched_at TEXT",
+  "ALTER TABLE transactions ADD COLUMN detail_claimed_at TEXT",
   "ALTER TABLE eb_sessions ADD COLUMN last_live_verified_at TEXT",
   "ALTER TABLE eb_sessions ADD COLUMN last_live_result TEXT",
   "ALTER TABLE eb_sessions ADD COLUMN live_verify_claimed_at TEXT NULL",

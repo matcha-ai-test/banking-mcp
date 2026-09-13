@@ -76,13 +76,13 @@ test("get_auth_status with omitted params matches the hand-written pre-change ou
   assertOutput(await handler("get_auth_status", dependencies).call(self, {}), authFixture);
 });
 
-test("refresh_now with omitted params matches the hand-written pre-change output", async (t) => {
+test("refresh_now with omitted params adds only the two enrichment summary counts", async (t) => {
   const { self, dependencies, bumps } = context(t, {
-    sessions: 1, accounts_synced: 2, new_transactions: 7, errors: [],
+    sessions: 1, accounts_synced: 2, new_transactions: 7, details_fetched: 2, details_failed: 1, errors: [],
   });
   assertOutput(await handler("refresh_now", dependencies).call(self, {}), [{
     session: "Example Bank/personal", sessions: 1, accounts_synced: 2,
-    new_transactions: 7, errors: [], budget_left_today: 1,
+    new_transactions: 7, details_fetched: 2, details_failed: 1, errors: [], budget_left_today: 1,
   }]);
   assert.deepEqual(bumps, [["local-fixture", "2030-01-01", 3]]);
 });
@@ -166,7 +166,7 @@ for (const first of ["details", "refresh_now"]) {
     dependencies.syncAll = async () => {
       syncCalls++;
       assert.equal((await db.activeSessions())[0].refresh_count_today, 3);
-      return { sessions: 1, accounts_synced: 1, new_transactions: 0, errors: [] };
+      return { sessions: 1, accounts_synced: 1, new_transactions: 0, details_fetched: 0, details_failed: 0, errors: [] };
     };
     // Force the chosen winner to reserve, then let the other tool contend while
     // the winner is still suspended before dispatch. The Db method stays real.

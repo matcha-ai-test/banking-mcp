@@ -104,8 +104,12 @@ for (const secret of ["EB_APP_ID", "EB_PRIVATE_KEY"]) {
   });
 }
 
-test("two concurrent detail calls with one slot left dispatch and charge exactly once", async (t) => {
-  const { env, db, read, mock, bumps } = await setup(t);
+test("two concurrent distinct details with one slot left dispatch and charge exactly once", async (t) => {
+  const { env, db, read, mock, bumps } = await setup(t, {
+    "GET /accounts/account/transactions/detail-id": DETAIL,
+    "GET /accounts/account/transactions/second-id": DETAIL,
+  });
+  await db.insertTransactionsIgnore([row("second", { ...RAW, transaction_id: "second-id" })]);
   env.DB.sqlite.prepare("UPDATE eb_sessions SET refresh_count_today = 2, refresh_count_date = '2030-01-01' WHERE id = 'selected'").run();
   // Hold both callers at the real atomic update so they compete for the last slot.
   const charge = db.tryChargeRefreshBudget.bind(db);
@@ -117,7 +121,7 @@ test("two concurrent detail calls with one slot left dispatch and charge exactly
     await ready;
     return charge(...args);
   };
-  const results = await Promise.all([read(), read()]);
+  const results = await Promise.all([read({ ...INPUT, transaction_id: "detail-id" }), read({ ...INPUT, transaction_id: "second-id" })]);
   assert.equal(results.filter((r) => r.debtor_name === "Example payer").length, 1);
   assert.deepEqual(results.find((r) => r.error), {
     error: "Daily refresh budget (3) used; serving cached data. Budget resets at midnight UTC.", budget_left_today: 0,
@@ -200,7 +204,7 @@ test("exhausted owning session budget blocks HTTP; another session's budget is i
   assert.deepEqual(bumps, []);
 });
 
-test("success uses one GET, bumps only its session once, sanitizes both records, and leaves the cache untouched", async (t) => {
+test("success uses one GET, bumps only its session once, sanitizes both records, and caches detail for a free second lookup", async (t) => {
   const { env, read, mock, bumps } = await setup(t);
   env.DB.sqlite.prepare("UPDATE eb_sessions SET refresh_count_today = 1, refresh_count_date = '2030-01-01' WHERE id = 'selected'").run();
   env.DB.sqlite.prepare("UPDATE eb_sessions SET refresh_count_today = 3, refresh_count_date = '2030-01-01' WHERE id = 'other'").run();
@@ -219,7 +223,16 @@ test("success uses one GET, bumps only its session once, sanitizes both records,
   assert.equal(env.DB.sqlite.prepare("SELECT refresh_count_today AS n FROM eb_sessions WHERE id = 'selected'").get().n, 2);
   assert.equal(env.DB.sqlite.prepare("SELECT refresh_count_today AS n FROM eb_sessions WHERE id = 'other'").get().n, 3);
   assert.deepEqual(mock.calls.map(({ method, path }) => ({ method, path })), [{ method: "GET", path: "/accounts/account/transactions/detail-id" }]);
-  assert.deepEqual(snapshot(env), before);
+  const stored = snapshot(env);
+  assert.deepEqual(JSON.parse(stored.transactions[0].raw), { ...RAW, detail: DETAIL });
+  assert.ok(stored.transactions[0].detail_fetched_at);
+  before.transactions[0].raw = stored.transactions[0].raw;
+  before.transactions[0].detail_fetched_at = stored.transactions[0].detail_fetched_at;
+  assert.deepEqual(stored, before);
+  const { budget_left_today, ...cached } = result;
+  assert.deepEqual(await read(), { ...cached, cached_detail: true });
+  assert.equal(mock.calls.length, 1);
+  assert.equal(bumps.length, 1);
 });
 
 test("UTC day rollover restores budget and banks may return the unchanged list record", async (t) => {
@@ -363,7 +376,11 @@ test("NULL budget date resets an exhausted stored count before a detail request"
 });
 
 test("concurrent successful details report their own RETURNING counts: 2 then 1 left", async (t) => {
-  const { env, db, read, mock } = await setup(t);
+  const { env, db, read, mock } = await setup(t, {
+    "GET /accounts/account/transactions/detail-id": DETAIL,
+    "GET /accounts/account/transactions/second-id": DETAIL,
+  });
+  await db.insertTransactionsIgnore([row("second", { ...RAW, transaction_id: "second-id" })]);
   const charge = db.tryChargeRefreshBudget.bind(db);
   let arrived = 0;
   let release;
@@ -373,8 +390,114 @@ test("concurrent successful details report their own RETURNING counts: 2 then 1 
     await ready;
     return charge(...args);
   };
-  const results = await Promise.all([read(), read()]);
+  const results = await Promise.all([read({ ...INPUT, transaction_id: "detail-id" }), read({ ...INPUT, transaction_id: "second-id" })]);
   assert.deepEqual(results.map((r) => r.budget_left_today).sort().reverse(), [2, 1]);
   assert.equal(mock.calls.length, 2);
   assert.equal(env.DB.sqlite.prepare("SELECT refresh_count_today AS n FROM eb_sessions WHERE id = 'selected'").get().n, 2);
+});
+
+for (const phase of ["prepare", "charge"]) {
+  test(`detail tool rechecks persisted enrichment after ${phase}`, async t => {
+    const { env, db, bumps, mock } = await setup(t);
+    const originalRow = snapshot(env).transactions[0];
+    const complete = () => db.storeTransactionDetail(originalRow, DETAIL);
+    if (phase === "charge") {
+      const charge = db.tryChargeRefreshBudget.bind(db);
+      db.tryChargeRefreshBudget = async (...args) => {
+        const result = await charge(...args);
+        await complete();
+        return result;
+      };
+    }
+    const result = await readTransactionDetails(db, () => ({
+      prepare: async () => { if (phase === "prepare") await complete(); },
+      getTransactionDetail: () => { throw new Error("cached row must not dispatch"); },
+    }), INPUT, null, NOW);
+    assert.equal(result.cached_detail, true);
+    assert.equal(result.debtor_name, "Example payer");
+    assert.equal(mock.calls.length, 0);
+    assert.equal(bumps.length, phase === "prepare" ? 0 : 1);
+  });
+}
+
+for (const marker of ["timestamp", "raw.detail"]) {
+  test(`detail tool serves persisted ${marker} without charging`, async t => {
+    const { env, db, bumps, mock } = await setup(t);
+    env.DB.sqlite.exec(marker === "timestamp"
+      ? "UPDATE transactions SET detail_fetched_at = '2030-01-01'"
+      : "UPDATE transactions SET raw = json_set(raw, '$.detail', json('{}'))");
+    const result = await readTransactionDetails(db, () => { throw new Error("must not construct client"); }, INPUT, null, NOW);
+    assert.equal(result.cached_detail, true);
+    assert.equal(mock.calls.length, 0);
+    assert.equal(bumps.length, 0);
+  });
+}
+
+test("concurrent detail writers persist once and both return the winner's detail", async t => {
+  const { env, db } = await setup(t);
+  const originalRow = snapshot(env).transactions[0];
+  const competingDb = new Db(env);
+  let arrived = 0;
+  let release;
+  const ready = new Promise(resolve => { release = resolve; });
+  const prepare = env.DB.prepare;
+  const writes = [];
+  env.DB.prepare = sql => {
+    const statement = prepare(sql);
+    if (!sql.includes("UPDATE transactions SET")) return statement;
+    return { bind: (...params) => ({ run: async () => {
+      if (++arrived === 2) release();
+      await ready;
+      const result = await statement.bind(...params).run();
+      writes.push(result.meta.changes);
+      return result;
+    } }) };
+  };
+  const results = await Promise.all([
+    db.storeTransactionDetail(originalRow, DETAIL),
+    competingDb.storeTransactionDetail(originalRow, { ...DETAIL, remittance_information: ["Other detail"] }),
+  ]);
+  assert.deepEqual(writes.sort(), [0, 1]);
+  const winner = JSON.parse(snapshot(env).transactions[0].raw).detail;
+  assert.deepEqual(results, [winner, winner]);
+});
+
+test("detail tool returns the concurrent persistence winner rather than its HTTP payload", async t => {
+  const { env, db, read } = await setup(t, {
+    "GET /accounts/account/transactions/detail-id": async () => {
+      await db.storeTransactionDetail(snapshot(env).transactions[0], { ...DETAIL, note: "Winner" });
+      return { ...DETAIL, note: "Loser" };
+    },
+  });
+  assert.equal((await read()).note, "Winner");
+  assert.equal(JSON.parse(snapshot(env).transactions[0].raw).detail.note, "Winner");
+});
+
+test("active detail claim times out without a budget charge or HTTP", async t => {
+  const { env, db, read, mock, bumps } = await setup(t);
+  const original = snapshot(env).transactions[0];
+  assert.equal(await db.claimTransactionDetail(original.id, new Date(NOW).toISOString(), new Date(NOW - 120_000).toISOString()), true);
+  const start = Date.now();
+  assert.deepEqual(await read(), { error: "detail_fetch_in_progress" });
+  assert.ok(Date.now() - start >= 2900);
+  assert.equal(mock.calls.length, 0);
+  assert.deepEqual(bumps, []);
+});
+
+test("tool takes over stale claim and old owner cannot release the new claim", async t => {
+  const { env, db, read, mock } = await setup(t);
+  const original = snapshot(env).transactions[0];
+  const old = new Date(NOW - 121_000).toISOString();
+  const cutoff = new Date(NOW - 120_000).toISOString();
+  assert.equal(await db.claimTransactionDetail(original.id, old, cutoff), true);
+  assert.equal(await db.claimTransactionDetail(original.id, cutoff, cutoff), true);
+  await db.releaseTransactionDetailClaim(original.id, old);
+  assert.equal(snapshot(env).transactions[0].detail_claimed_at, cutoff);
+  // Equality is not stale; only claims strictly older than the cutoff qualify.
+  assert.equal(await db.claimTransactionDetail(original.id, new Date(NOW).toISOString(), cutoff), false);
+  env.DB.sqlite.prepare("UPDATE transactions SET detail_claimed_at = ?").run(old);
+  assert.equal((await read()).debtor_name, "Example payer");
+  assert.equal(mock.calls.length, 1);
+  assert.equal(snapshot(env).transactions[0].detail_claimed_at, null);
+  assert.equal(await db.claimTransactionDetail(original.id, new Date(NOW).toISOString(), cutoff), false);
 });

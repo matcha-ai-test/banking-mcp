@@ -1,4 +1,4 @@
-import type { AccountRow, AuthStatusSessionRow, BalanceRow, EbSessionRow, Env, PsuType, TxRow } from "./types";
+import type { AccountRow, AuthStatusSessionRow, BalanceRow, EbTransaction, EbSessionRow, Env, PsuType, TxRow } from "./types";
 
 /**
  * D1 repository. The database is bound directly to the Worker — it has no
@@ -270,7 +270,7 @@ export class Db {
   }
 
   /** Idempotent insert; returns number of newly inserted rows. */
-  async insertTransactionsIgnore(rows: TxRow[]): Promise<number> {
+  async insertTransactionsIgnore(rows: TxRow[], insertedRows?: TxRow[]): Promise<number> {
     if (rows.length === 0) return 0;
     const stmt = this.d1.prepare(
       `INSERT OR IGNORE INTO transactions
@@ -289,9 +289,64 @@ export class Db {
           )
         )
       );
-      for (const r of results) inserted += r.meta.changes ?? 0;
+      for (const [index, r] of results.entries()) {
+        inserted += r.meta.changes ?? 0;
+        if (r.meta.changes > 0) insertedRows?.push(chunk[index]);
+      }
     }
     return inserted;
+  }
+
+  /** Re-read the persisted row; newly inserted sync rows do not yet carry an id. */
+  async persistedTransaction(row: TxRow): Promise<(TxRow & { id: number }) | null> {
+    return this.d1.prepare("SELECT * FROM transactions WHERE account_uid = ? AND dedup_key = ?")
+      .bind(row.account_uid, row.dedup_key).first<TxRow & { id: number }>();
+  }
+
+  /** Atomically coordinate detail dispatch across sync and on-demand callers. */
+  async claimTransactionDetail(rowId: number, nowIso: string, staleCutoffIso: string): Promise<boolean> {
+    const claimed = await this.d1.prepare(
+      `UPDATE transactions SET detail_claimed_at = ? WHERE id = ? AND detail_fetched_at IS NULL
+       AND (detail_claimed_at IS NULL OR detail_claimed_at < ?) RETURNING id`
+    ).bind(nowIso, rowId, staleCutoffIso).first<{ id: number }>();
+    return claimed !== null;
+  }
+
+  /** Only release our lease, never a newer caller's stale-claim takeover. */
+  async releaseTransactionDetailClaim(rowId: number, claimedAt: string): Promise<void> {
+    await this.d1.prepare("UPDATE transactions SET detail_claimed_at = NULL WHERE id = ? AND detail_claimed_at = ?")
+      .bind(rowId, claimedAt).run();
+  }
+
+  /** Cache detail once without modifying transaction identity, amounts or dates. */
+  async storeTransactionDetail(row: TxRow, detail: EbTransaction): Promise<EbTransaction> {
+    const current = await this.persistedTransaction(row);
+    if (!current) throw new Error("Transaction no longer cached");
+    const cachedDetail = (stored: TxRow): EbTransaction | null => {
+      let raw;
+      try { raw = JSON.parse(stored.raw ?? "null"); } catch { raw = null; }
+      return raw?.detail ?? (stored.detail_fetched_at != null ? raw ?? {} : null);
+    };
+    const cached = cachedDetail(current);
+    if (cached !== null) return cached;
+    const remittance = (detail.remittance_information ?? []).join(" ").trim();
+    const counterparty = (row.credit_debit === "DBIT" ? detail.creditor?.name : detail.debtor?.name) ?? null;
+    const result = await this.d1.prepare(
+      `UPDATE transactions SET
+         raw = json_set(CASE WHEN json_valid(raw) THEN raw ELSE '{}' END, '$.detail', json(?)),
+         detail_fetched_at = ?,
+         counterparty = CASE WHEN ? <> '' AND ? IS NOT remittance_info
+           THEN COALESCE(counterparty, ?) ELSE counterparty END,
+         remittance_info = CASE WHEN ? <> '' AND ? IS NOT remittance_info
+           THEN ? ELSE remittance_info END
+       WHERE id = ? AND detail_fetched_at IS NULL`
+    ).bind(JSON.stringify(detail), new Date().toISOString(), remittance, remittance, counterparty,
+      remittance, remittance, remittance, current.id).run();
+    if (result.meta.changes > 0) return detail;
+    const winner = await this.persistedTransaction(current);
+    const winnerDetail = winner && cachedDetail(winner);
+    if (winnerDetail === null) throw new Error("Transaction detail was not persisted");
+    return winnerDetail;
   }
 
   async queryTransactions(opts: {

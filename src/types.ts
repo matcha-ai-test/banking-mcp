@@ -52,6 +52,8 @@ export interface TxRow {
   entry_reference: string | null;
   dedup_key: string;
   raw: string | null;
+  detail_fetched_at?: string | null;
+  detail_claimed_at?: string | null;
 }
 
 export interface BalanceRow {

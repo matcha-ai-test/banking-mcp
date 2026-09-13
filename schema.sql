@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS transactions (
   entry_reference TEXT,
   dedup_key TEXT NOT NULL,
   raw TEXT,
+  detail_fetched_at TEXT,
+  detail_claimed_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE (account_uid, dedup_key)
 );

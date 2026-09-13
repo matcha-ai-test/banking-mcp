@@ -23,7 +23,7 @@ const SERVER_INSTRUCTIONS = `banking-mcp is a read-only mirror of the operator's
 
 Normal order: list_accounts to resolve accounts, then get_balances or get_transactions, then export_statements for bulk history. Account uids change after every re-authorization: always match on account name or IBAN, never on a hardcoded uid.
 
-get_transaction_details fetches the bank's extended record for one cached transaction (one bank fetch from the daily budget); use it when a list row's text is only the account holder's own name.
+Rows whose bank text is only the account holder's own name are automatically enriched from the bank's detail record during sync (capped per night); get_transaction_details returns the cached detail for free and only calls the bank when no detail is cached yet (one bank fetch from the daily budget).
 
 refresh_now fetches transactions and balances from the bank. It is budgeted: 3 per bank per UTC day, because banks allow roughly 4 unattended fetches a day and the nightly sync reserves one. A failed attempt can still consume budget. Never call refresh_now to test connectivity.
 
@@ -173,7 +173,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       "get_transaction_details",
       {
         description:
-          "Fetch the bank's extended record for one cached transaction. Costs one bank fetch from the daily budget. Use when a list row's text is only the account holder's own name. Banks may return nothing extra. The transaction cache is unchanged.",
+          "Return the bank's extended record for one cached transaction. Cached details are free and make no bank call. Otherwise, fetch once from the daily budget and cache the detail for future lookups. Sync automatically enriches unclear bank text within per-account and per-session caps. Banks may return nothing extra.",
         inputSchema: {
           account: z.string().optional().describe("Account name, IBAN, uid or bank name. Omit for all accounts."),
           booking_date: z.iso.date().describe("YYYY-MM-DD booking date of the cached transaction"),

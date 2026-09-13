@@ -24,6 +24,13 @@ function cachedRaw(row: TxRow): Record<string, unknown> {
   try { return object(JSON.parse(row.raw ?? "null")); } catch { return {}; }
 }
 
+function cachedDetailResponse(row: TxRow) {
+  const raw = cachedRaw(row);
+  if (row.detail_fetched_at == null && raw.detail == null) return null;
+  return { ...(raw.detail != null ? sanitizeTransactionDetails(raw.detail) : sanitizeTransactionDetails(raw, row)),
+    list_row: sanitizeTransactionDetails(raw, row), cached_detail: true };
+}
+
 function signed(cents: number, direction: unknown): number {
   return Number(((direction === "DBIT" ? -Math.abs(cents) : Math.abs(cents)) / 100).toFixed(2));
 }
@@ -54,7 +61,7 @@ export function sanitizeTransactionDetails(value: unknown, cached?: TxRow) {
   };
 }
 
-/** One on-demand GET; only the session budget is updated, never the transaction cache. */
+/** Cached details are free; otherwise charge once, fetch once and persist. */
 export async function readTransactionDetails(
   db: Db,
   createClient: () => Pick<EbClient, "prepare" | "getTransactionDetail">,
@@ -74,6 +81,8 @@ export async function readTransactionDetails(
   const row = rows[0];
   const raw = cachedRaw(row);
   const listRow = sanitizeTransactionDetails(raw, row);
+  const cached = cachedDetailResponse(row);
+  if (cached) return cached;
   const transactionId = string(raw.transaction_id);
   if (!transactionId) return {
     error: "This bank did not provide a transaction_id; no additional details are available", cached: listRow,
@@ -93,18 +102,40 @@ export async function readTransactionDetails(
   } catch {
     return { error: "key_invalid" };
   }
-  const budget = await db.tryChargeRefreshBudget(session.id, today, REFRESH_BUDGET_PER_DAY);
-  if (!budget.charged) return {
-    error: `Daily refresh budget (${REFRESH_BUDGET_PER_DAY}) used; serving cached data. Budget resets at midnight UTC.`,
-    budget_left_today: 0,
-  };
-  let detail;
+  const preparedRow = await db.persistedTransaction(row);
+  if (!preparedRow) return { error: "No cached transaction matches" };
+  const preparedCache = cachedDetailResponse(preparedRow);
+  if (preparedCache) return preparedCache;
+  const claimedAt = new Date(nowMs).toISOString();
+  if (!await db.claimTransactionDetail(preparedRow.id, claimedAt, new Date(nowMs - 120_000).toISOString())) {
+    // A competing caller owns dispatch. Wait briefly for its persisted result,
+    // without charging this caller or issuing another HTTP request.
+    for (let poll = 0; poll <= 30; poll++) {
+      if (poll > 0) await new Promise(resolve => setTimeout(resolve, 100));
+      const winner = await db.persistedTransaction(row);
+      const winnerCache = winner && cachedDetailResponse(winner);
+      if (winnerCache) return winnerCache;
+    }
+    return { error: "detail_fetch_in_progress" };
+  }
   try {
-    detail = await client.getTransactionDetail(row.account_uid, transactionId);
+    const budget = await db.tryChargeRefreshBudget(session.id, today, REFRESH_BUDGET_PER_DAY);
+    if (!budget.charged) return {
+      error: `Daily refresh budget (${REFRESH_BUDGET_PER_DAY}) used; serving cached data. Budget resets at midnight UTC.`,
+      budget_left_today: 0,
+    };
+    const current = await db.persistedTransaction(row);
+    if (!current) return { error: "No cached transaction matches" };
+    const currentCache = cachedDetailResponse(current);
+    if (currentCache) return currentCache;
+    let detail = await client.getTransactionDetail(row.account_uid, transactionId);
+    detail = await db.storeTransactionDetail(current, detail);
+    return { ...sanitizeTransactionDetails(detail), list_row: listRow,
+      budget_left_today: REFRESH_BUDGET_PER_DAY - budget.count };
   } catch (error) {
     return { error: error instanceof ExpiredSessionError ? "expired_session"
       : error instanceof RateLimitError ? "rate_limited" : "transaction_details_failed" };
+  } finally {
+    await db.releaseTransactionDetailClaim(preparedRow.id, claimedAt);
   }
-  return { ...sanitizeTransactionDetails(detail), list_row: listRow,
-    budget_left_today: REFRESH_BUDGET_PER_DAY - budget.count };
 }
