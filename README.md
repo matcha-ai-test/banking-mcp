@@ -1,7 +1,7 @@
 # banking-mcp
 
 [![CI](https://github.com/matcha-ai-test/banking-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/matcha-ai-test/banking-mcp/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 
 Private, read-only bank access for [Claude](https://claude.ai) and [Codex](https://openai.com/codex/), powered by [Enable Banking](https://enablebanking.com). It reads balances and transaction history from accounts you approve. **It has no bank-side write capability:** it cannot create, change, or delete bank data, move money, or initiate payments. It writes only to its own private cache.
 
@@ -260,4 +260,6 @@ Bug reports, security reports, and pull requests are welcome. See [CONTRIBUTING.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later). See [LICENSE](LICENSE).
+
+In short: you may use, modify and self-host this server freely, but if you distribute it or run a modified version as a network service for others, you must publish your modified source under the same license. Commits before 2026-09-13 were published under the MIT license; that grant remains valid for those versions.

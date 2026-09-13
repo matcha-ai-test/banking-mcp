@@ -2,7 +2,7 @@
   "name": "banking-mcp",
   "version": "1.0.0",
   "private": true,
-  "license": "MIT",
+  "license": "AGPL-3.0-or-later",
   "description": "Read-only multi-bank MCP server for Claude and Codex via Enable Banking (PSD2 AIS). No bank-side writes or payments.",
   "type": "module",
   "engines": {

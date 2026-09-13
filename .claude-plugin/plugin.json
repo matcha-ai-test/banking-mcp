@@ -4,5 +4,5 @@
   "version": "1.0.0",
   "author": { "name": "Leon" },
   "homepage": "https://github.com/matcha-ai-test/banking-mcp",
-  "license": "MIT"
+  "license": "AGPL-3.0-or-later"
 }
