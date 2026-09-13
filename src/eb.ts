@@ -74,6 +74,11 @@ export class EbClient {
     this.privateKey = env.EB_PRIVATE_KEY;
   }
 
+  /** Mint and cache the JWT locally before reserving a request budget; no HTTP. */
+  public async prepare(): Promise<void> {
+    await this.token();
+  }
+
   private async token(): Promise<string> {
     const now = Math.floor(Date.now() / 1000);
     if (this.jwt && now < this.jwtExp - 60) return this.jwt;
@@ -168,6 +173,10 @@ export class EbClient {
 
   async getBalances(accountUid: string): Promise<{ balances: EbBalance[] }> {
     return this.request(`/accounts/${encodeURIComponent(accountUid)}/balances`);
+  }
+
+  async getTransactionDetail(accountUid: string, transactionId: string): Promise<EbTransaction> {
+    return this.request(`/accounts/${encodeURIComponent(accountUid)}/transactions/${encodeURIComponent(transactionId)}`, {}, { retry: false });
   }
 
   async getTransactions(

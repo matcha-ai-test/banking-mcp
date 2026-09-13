@@ -139,6 +139,18 @@ export class Db {
       .run();
   }
 
+  /**
+   * Atomically charge an attempt before dispatch; failed requests keep their charge.
+   * RETURNING captures this caller's count: budget_left_today = limit - (count after this charge).
+   * An uncharged attempt has no returned row; its count is unused.
+   */
+  async tryChargeRefreshBudget(sessionId: string, today: string, limit: number): Promise<{ charged: boolean; count: number }> {
+    const row = await this.d1.prepare(
+      "UPDATE eb_sessions SET refresh_count_today = CASE WHEN refresh_count_date = ? THEN refresh_count_today + 1 ELSE 1 END, refresh_count_date = ? WHERE id = ? AND (refresh_count_date IS NULL OR refresh_count_date != ? OR refresh_count_today < ?) RETURNING refresh_count_today"
+    ).bind(today, today, sessionId, today, limit).first<{ refresh_count_today: number }>();
+    return { charged: row !== null, count: row?.refresh_count_today ?? 0 };
+  }
+
   // ---- accounts ----
 
   async allAccounts(): Promise<AccountRow[]> {
@@ -230,6 +242,32 @@ export class Db {
   }
 
   // ---- transactions ----
+
+  /** Resolve a booked cache row without fetching or modifying bank data. */
+  async findTransactionDetails(opts: {
+    transactionId?: string;
+    bookingDate: string;
+    amountCents: number;
+    accountUids?: string[] | null;
+  }): Promise<TxRow[]> {
+    if (opts.accountUids?.length === 0) return [];
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (opts.transactionId !== undefined) {
+      where.push("CASE WHEN json_valid(raw) THEN json_extract(raw, '$.transaction_id') END = ?");
+      params.push(opts.transactionId);
+    } else {
+      where.push("booking_date = ?", "(CASE WHEN credit_debit = 'DBIT' THEN -ABS(amount_cents) ELSE ABS(amount_cents) END) = ?");
+      params.push(opts.bookingDate, opts.amountCents);
+    }
+    if (opts.accountUids) {
+      where.push(`account_uid IN (${opts.accountUids.map(() => "?").join(",")})`);
+      params.push(...opts.accountUids);
+    }
+    return (await this.d1.prepare(
+      `SELECT * FROM transactions WHERE ${where.join(" AND ")} ORDER BY booking_date DESC, id DESC`
+    ).bind(...params).all<TxRow>()).results;
+  }
 
   /** Idempotent insert; returns number of newly inserted rows. */
   async insertTransactionsIgnore(rows: TxRow[]): Promise<number> {

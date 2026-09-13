@@ -4,6 +4,7 @@ import { z } from "zod";
 import { Db } from "./db";
 import { EbClient } from "./eb";
 import { readAuthStatus } from "./auth-status";
+import { readTransactionDetails } from "./transaction-details";
 import { buildStatementExport } from "./export";
 import { migrate } from "./migrate";
 import {
@@ -21,6 +22,8 @@ import { maskIban, matchAccountUids } from "./util";
 const SERVER_INSTRUCTIONS = `banking-mcp is a read-only mirror of the operator's bank accounts (Enable Banking, PSD2). Tools read a local cache filled by a nightly sync unless a live call is explicitly requested. Nothing here moves money or writes to a bank.
 
 Normal order: list_accounts to resolve accounts, then get_balances or get_transactions, then export_statements for bulk history. Account uids change after every re-authorization: always match on account name or IBAN, never on a hardcoded uid.
+
+get_transaction_details fetches the bank's extended record for one cached transaction (one bank fetch from the daily budget); use it when a list row's text is only the account holder's own name.
 
 refresh_now fetches transactions and balances from the bank. It is budgeted: 3 per bank per UTC day, because banks allow roughly 4 unattended fetches a day and the nightly sync reserves one. A failed attempt can still consume budget. Never call refresh_now to test connectivity.
 
@@ -167,6 +170,27 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
     );
 
     this.server.registerTool(
+      "get_transaction_details",
+      {
+        description:
+          "Fetch the bank's extended record for one cached transaction. Costs one bank fetch from the daily budget. Use when a list row's text is only the account holder's own name. Banks may return nothing extra. The transaction cache is unchanged.",
+        inputSchema: {
+          account: z.string().optional().describe("Account name, IBAN, uid or bank name. Omit for all accounts."),
+          booking_date: z.iso.date().describe("YYYY-MM-DD booking date of the cached transaction"),
+          amount: z.number().describe("Signed amount: negative = money out, positive = money in"),
+          transaction_id: z.string().min(1).optional().describe("Pass a candidate transaction_id to resolve an ambiguous match"),
+        },
+      },
+      async ({ account, booking_date, amount, transaction_id }) => {
+        const db = this.db();
+        const uids = await this.resolveAccountUids(db, account);
+        const result = await readTransactionDetails(db, () => new EbClient(this.cfg),
+          { booking_date, amount, transaction_id }, uids);
+        return this.text("", result);
+      }
+    );
+
+    this.server.registerTool(
       "export_statements",
       {
         description:
@@ -226,15 +250,16 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
           const sessionUids = uids === null ? undefined : (ownedBySession.get(s.id) ?? []);
           if (sessionUids && sessionUids.length === 0) continue;
 
-          const count = s.refresh_count_date === today ? s.refresh_count_today : 0;
-          if (count >= REFRESH_BUDGET_PER_DAY) {
+          // The old read-then-bump could overwrite concurrent detail charges.
+          // Both tools must reserve through the same atomic budget update.
+          const budget = await db.tryChargeRefreshBudget(s.id, today, REFRESH_BUDGET_PER_DAY);
+          if (!budget.charged) {
             results.push({
               session: `${s.aspsp_name}/${s.psu_type}`,
               skipped: `Daily refresh budget (${REFRESH_BUDGET_PER_DAY}) used; serving cached data. Budget resets at midnight UTC.`,
             });
             continue;
           }
-          await db.bumpRefreshCount(s.id, count + 1, today);
           const summary = await syncAll(this.cfg, "refresh_now", { sessionPk: s.id, accountUids: sessionUids, strategy });
           // An unfiltered refresh of an active session that owns no accounts is
           // not success: the account is usually not linked to the app in the
@@ -249,7 +274,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
           results.push({
             session: `${s.aspsp_name}/${s.psu_type}`,
             ...summary,
-            budget_left_today: REFRESH_BUDGET_PER_DAY - count - 1,
+            budget_left_today: REFRESH_BUDGET_PER_DAY - budget.count,
             ...emptyHint,
           });
         }

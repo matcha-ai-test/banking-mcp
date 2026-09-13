@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
-import "./helpers.mjs";
+import { stripTypeScriptTypes } from "node:module";
+import { z } from "zod";
+import { createEnv, mockEnableBanking } from "./helpers.mjs";
+const { Db } = await import("../src/db.ts");
 const { readAuthStatus } = await import("../src/auth-status.ts");
 import { buildAuthStatus, serializeMcpText, AUTH_LINK_CMD, REFRESH_BUDGET_PER_DAY } from "../src/mcp-output.ts";
 
@@ -37,7 +40,7 @@ function handler(name, dependencies) {
   const body = source.slice(start, end).trim().replaceAll("true as const", "true")
     .replace("new Map<string, string[]>()", "new Map()")
     .replace(/^async \(([^)]*)\) =>/, "async function($1)");
-  return Function(...Object.keys(dependencies), `return (${body});`)(...Object.values(dependencies));
+  return Function(...Object.keys(dependencies), `return ${stripTypeScriptTypes(`(${body})`)};`)(...Object.values(dependencies));
 }
 
 function context(t, syncSummary) {
@@ -46,7 +49,7 @@ function context(t, syncSummary) {
   const db = {
     allSessions: async (limit) => { assert.equal(limit, 10); return [session]; },
     activeSessions: async () => [session],
-    bumpRefreshCount: async (...args) => { bumps.push(args); },
+    tryChargeRefreshBudget: async (...args) => { bumps.push(args); return { charged: true, count: 2 }; },
   };
   const self = { db: () => db, cfg: {}, env: {}, resolveAccountUids: async (_db, account) => {
     assert.equal(account, undefined); return null;
@@ -81,7 +84,7 @@ test("refresh_now with omitted params matches the hand-written pre-change output
     session: "Example Bank/personal", sessions: 1, accounts_synced: 2,
     new_transactions: 7, errors: [], budget_left_today: 1,
   }]);
-  assert.deepEqual(bumps, [["local-fixture", 2, "2030-01-01"]]);
+  assert.deepEqual(bumps, [["local-fixture", "2030-01-01", 3]]);
 });
 
 
@@ -98,3 +101,105 @@ test("verify=true adds all live fields while preserving sync evidence and exclud
   assert.deepEqual(JSON.parse(actual.content[0].text), expected);
   assert.equal(actual.content[0].text.includes("internal-only"), false);
 });
+
+// Literal pre-details output, including pending rows and signed amounts.
+const transactionsFixture = {
+  booked: [{ account: "Primary", booking_date: "2030-01-01", amount: -12.34,
+    currency: "EUR", counterparty: "Example payee", description: "Example purchase" }],
+  pending: [{ account: "Primary", booking_date: "2030-01-02", amount: 5.67,
+    currency: "EUR", counterparty: null, description: "Example refund", status: "PENDING" }],
+  note: "Amounts are signed: negative = money out, positive = money in. Cached data: see last_synced_at via list_accounts.",
+};
+
+test("get_transactions with omitted params matches the hand-written pre-change output", async (t) => {
+  const { self, dependencies } = context(t);
+  const env = await createEnv();
+  t.after(() => env.DB.close());
+  const mock = mockEnableBanking({});
+  t.after(() => mock.restore());
+  const db = new Db(env);
+  await db.insertSession(session);
+  await db.upsertAccounts([{ account_uid: "account", session_pk: session.id, name: "Primary", iban: null,
+    currency: "EUR", psu_type: "personal", product: null, last_synced_at: null }]);
+  const row = { account_uid: "account", booking_date: "2030-01-01", value_date: null,
+    amount_cents: 1234, currency: "EUR", credit_debit: "DBIT", counterparty: "Example payee",
+    remittance_info: "Example purchase", entry_reference: "fixture", dedup_key: "fixture",
+    raw: JSON.stringify({ transaction_id: "detail-id", note: "Must not add detail fields to list output" }) };
+  await db.insertTransactionsIgnore([row]);
+  await db.replacePending("account", [{ ...row, booking_date: "2030-01-02", amount_cents: 567,
+    credit_debit: "CRDT", counterparty: null, remittance_info: "Example refund" }]);
+  self.db = () => db;
+  const source = readFileSync(new URL("../src/mcp.ts", import.meta.url), "utf8");
+  const start = source.indexOf('      "get_transactions",');
+  const end = source.indexOf("      async (", start);
+  const config = source.slice(start + '      "get_transactions",'.length, end).trim().replace(/,$/, "");
+  const { inputSchema } = Function("z", `return (${config})`)(z);
+  const input = z.object(inputSchema).parse({});
+  assert.deepEqual(input, { limit: 100, include_pending: true });
+  const moneyFunctions = source.slice(source.indexOf("function money("), source.indexOf("export class BankingMCP"));
+  dependencies.signed = Function(`${stripTypeScriptTypes(moneyFunctions)}; return signed;`)();
+  assertOutput(await handler("get_transactions", dependencies).call(self, input), transactionsFixture);
+  assert.equal(mock.calls.length, 0);
+  assert.equal((await db.activeSessions())[0].refresh_count_today, 0);
+});
+
+for (const first of ["details", "refresh_now"]) {
+  test(`concurrent details and refresh_now cannot overspend or overwrite a charge (${first} wins)`, async (t) => {
+    const { self, dependencies } = context(t);
+    const { readTransactionDetails } = await import("../src/transaction-details.ts");
+    const { EbClient } = await import("../src/eb.ts");
+    const env = await createEnv();
+    t.after(() => env.DB.close());
+    const db = new Db(env);
+    await db.insertSession(session);
+    await db.upsertAccounts([{ account_uid: "account", session_pk: session.id, name: "Primary", iban: null,
+      currency: "EUR", psu_type: "personal", product: null, last_synced_at: null }]);
+    await db.insertTransactionsIgnore([{ account_uid: "account", booking_date: "2030-01-01", value_date: null,
+      amount_cents: 1234, currency: "EUR", credit_debit: "DBIT", counterparty: null,
+      remittance_info: "Example", entry_reference: "fixture", dedup_key: "fixture",
+      raw: JSON.stringify({ transaction_id: "detail-id" }) }]);
+    env.DB.sqlite.prepare("UPDATE eb_sessions SET refresh_count_today = 2, refresh_count_date = '2030-01-01'").run();
+    const mock = mockEnableBanking({ "GET /accounts/account/transactions/detail-id": {} });
+    t.after(() => mock.restore());
+    self.db = () => db;
+    let syncCalls = 0;
+    dependencies.syncAll = async () => {
+      syncCalls++;
+      assert.equal((await db.activeSessions())[0].refresh_count_today, 3);
+      return { sessions: 1, accounts_synced: 1, new_transactions: 0, errors: [] };
+    };
+    // Force the chosen winner to reserve, then let the other tool contend while
+    // the winner is still suspended before dispatch. The Db method stays real.
+    const charge = db.tryChargeRefreshBudget.bind(db);
+    let firstArrived;
+    const ready = new Promise((resolve) => { firstArrived = resolve; });
+    let release;
+    const otherArrived = new Promise((resolve) => { release = resolve; });
+    let calls = 0;
+    db.tryChargeRefreshBudget = async (...args) => {
+      const isFirst = ++calls === 1;
+      const result = await charge(...args);
+      if (isFirst) { firstArrived(); await otherArrived; } else { release(); }
+      return result;
+    };
+    const details = () => readTransactionDetails(db, () => new EbClient(env),
+      { booking_date: "2030-01-01", amount: -12.34 }, null, NOW);
+    const refresh = () => handler("refresh_now", dependencies).call(self, {});
+    const winner = first === "details" ? details() : refresh();
+    await ready;
+    const loser = first === "details" ? refresh() : details();
+    const [win, lose] = await Promise.all([winner, loser]);
+    assert.equal((await db.activeSessions())[0].refresh_count_today, 3);
+    assert.equal(mock.calls.length, first === "details" ? 1 : 0);
+    assert.equal(syncCalls, first === "refresh_now" ? 1 : 0);
+    const refreshResult = JSON.parse((first === "refresh_now" ? win : lose).content[0].text);
+    if (first === "details") {
+      assert.equal(win.budget_left_today, 0);
+      assert.deepEqual(refreshResult, [{ session: "Example Bank/personal",
+        skipped: "Daily refresh budget (3) used; serving cached data. Budget resets at midnight UTC." }]);
+    } else {
+      assert.equal(refreshResult[0].budget_left_today, 0);
+      assert.deepEqual(lose, { error: "Daily refresh budget (3) used; serving cached data. Budget resets at midnight UTC.", budget_left_today: 0 });
+    }
+  });
+}
