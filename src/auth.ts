@@ -201,7 +201,7 @@ export async function handleAuthCallback(request: Request, env: Env): Promise<Re
 
     // Re-auth mints fresh account_uids for the same IBANs; fold any prior generations into
     // the new uid so history stays under one account and the backfill's INSERT OR IGNORE
-    // dedups against it. This also self-heals existing duplicates on the next BankID login.
+    // dedups against it. This also self-heals existing duplicates on the next bank authorization.
     for (const a of accountRows) {
       const stale = await db.staleAccountGenerations(a.iban, a.currency, a.psu_type, a.account_uid);
       for (const oldUid of stale) {

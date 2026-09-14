@@ -5,9 +5,9 @@
 
 Private, read-only bank access for [Claude](https://claude.ai) and [Codex](https://openai.com/codex/), powered by [Enable Banking](https://enablebanking.com). It reads balances and transaction history from accounts you approve. **It has no bank-side write capability:** it cannot create, change, or delete bank data, move money, or initiate payments. It writes only to its own private cache.
 
-Created by **Leon Curmak**.
-
 Navigation: [Installation](#quick-start) · [Connect a client](#connecting-a-client) · [Tools](#tools) · [Configuration](#enrichment-configuration) · [Security](#security)
+
+Designed for EU/EEA banking through Enable Banking. Availability depends on the country, bank, account type, and application access; support for every bank is not guaranteed.
 
 ## Requirements
 
@@ -294,6 +294,6 @@ Bug reports, security reports, and pull requests are welcome. See [CONTRIBUTING.
 
 ## License
 
-GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later). See [LICENSE](LICENSE).
+[AGPL-3.0-or-later](LICENSE) · Copyright © 2026 Leon Curmak.
 
 See the license text for source-distribution and remote-network interaction requirements. For an older version, consult the license included with that commit.

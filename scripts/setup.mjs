@@ -35,7 +35,7 @@ const optionValue = (name) => process.argv.slice(2).find((arg) => arg.startsWith
 const wantPrint = args.has("--print");
 const nonInteractive = args.has("--yes") || !stdinStream.isTTY;
 const langArg = process.argv.slice(2).find((arg) => arg.startsWith("--lang="))?.slice(7);
-// English unless explicitly asked for Swedish; the docs and pages are English-only.
+// Documentation and pages are in English.
 const language = langArg === "sv" ? "sv" : "en";
 const tr = (en, sv) => (language === "sv" ? sv : en);
 

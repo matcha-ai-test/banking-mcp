@@ -41,7 +41,7 @@ All tools are read-only toward the bank. Live operations can update the server's
   previews the candidate count from the cache for free before spending live budget.
 
 ## Auth & multi-bank
-- Sessions renew via bank login (BankID or the bank's own flow), using a link generated on the **authorizer**
+- Sessions renew through the bank's authentication and consent flow, using a link generated on the **authorizer**
   (`npm run auth:link`). No MCP tool can renew a session. If `get_auth_status` shows expired/renewal_due,
   ask the authorizer to run the link — don't retry blindly.
 - Add any bank Enable Banking supports: whitelist its accounts in the Enable Banking Control Panel, then
