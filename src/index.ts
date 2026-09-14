@@ -5,7 +5,7 @@ import { migrate } from "./migrate";
 import { handleAuthorize } from "./oauth";
 import { homePage, privacyPage, termsPage } from "./pages";
 import { isConfigured } from "./settings";
-import { syncAll } from "./sync";
+import { enrichmentPolicyFromEnv, syncAll } from "./sync";
 import type { Env } from "./types";
 import { bearerFrom, secretsMatch } from "./util";
 
@@ -96,7 +96,12 @@ export default {
       (async () => {
         const resolved = await resolve(env);
         if (!isConfigured(resolved)) return;
-        const summary = await syncAll(resolved, "cron");
+        const policy = enrichmentPolicyFromEnv(resolved);
+        const summary = await syncAll(resolved, "cron", {
+          enrichBackfillDays: policy.enrichBackfillDays,
+          enrichMaxPerAccount: policy.enrichMaxPerAccount,
+          enrichMaxPerSession: policy.enrichMaxPerSession,
+        });
         console.log("cron sync:", JSON.stringify(summary));
       })()
     );

@@ -3,6 +3,11 @@ export interface Env extends Cloudflare.Env {
   EB_PRIVATE_KEY?: string;
   MCP_SECRET?: string;
   START_TOKEN?: string;
+  /** Optional nightly-sync enrichment policy knobs; conservative recommendations, not bank-documented
+   * limits. Invalid or missing values fall back to the built-in defaults. Not secrets: plain Worker vars. */
+  ENRICH_BACKFILL_DAYS?: string;
+  ENRICH_MAX_PER_ACCOUNT?: string;
+  ENRICH_MAX_PER_SESSION?: string;
 }
 
 export type PsuType = "personal" | "business";

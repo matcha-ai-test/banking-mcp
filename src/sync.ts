@@ -6,6 +6,8 @@ import { daysAgo, isoDate, sha256Hex } from "./util";
 const MAX_PAGES_PER_ACCOUNT = 80;
 const OVERLAP_DAYS = 10;
 const BACKOFF_HOURS = 6;
+/** Conservative recommendations, not documented bank limits; all three are configurable per call and, for the
+ * nightly cron, via the optional ENRICH_BACKFILL_DAYS / ENRICH_MAX_PER_ACCOUNT / ENRICH_MAX_PER_SESSION Worker vars. */
 export const ENRICH_MAX_PER_ACCOUNT = 3;
 export const ENRICH_MAX_PER_SESSION = 6;
 export const ENRICH_BACKFILL_DAYS = 45;
@@ -17,6 +19,26 @@ interface EnrichmentBudget {
 
 function enrichmentLimit(value: number | undefined, fallback: number): number {
   return value === undefined ? fallback : Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+}
+
+function parseNonNegativeInt(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined;
+}
+
+/** Nightly cron enrichment policy from optional Worker vars; invalid or missing values fall back to the
+ * conservative recommendations above, so an unconfigured deployment behaves exactly as before. */
+export function enrichmentPolicyFromEnv(env: Env): {
+  enrichBackfillDays: number;
+  enrichMaxPerAccount: number;
+  enrichMaxPerSession: number;
+} {
+  return {
+    enrichBackfillDays: parseNonNegativeInt(env.ENRICH_BACKFILL_DAYS) ?? ENRICH_BACKFILL_DAYS,
+    enrichMaxPerAccount: parseNonNegativeInt(env.ENRICH_MAX_PER_ACCOUNT) ?? ENRICH_MAX_PER_ACCOUNT,
+    enrichMaxPerSession: parseNonNegativeInt(env.ENRICH_MAX_PER_SESSION) ?? ENRICH_MAX_PER_SESSION,
+  };
 }
 
 function enrichmentCandidate(row: TxRow, holder: string | null): boolean {
@@ -101,7 +123,18 @@ export async function syncAccount(
   db: Db,
   eb: EbClient,
   account: AccountRow,
-  opts: { dateFrom?: string; strategy?: "default" | "longest"; enrichMax?: number; enrichBackfillDays?: number; enrichmentBudget?: EnrichmentBudget } = {}
+  opts: {
+    dateFrom?: string;
+    strategy?: "default" | "longest";
+    /** Overrides both the per-account and per-session caps with the same limit; 0 disables detail calls. */
+    enrichMax?: number;
+    /** Per-account cap when enrichMax is not set (used by the cron env policy). */
+    enrichMaxPerAccount?: number;
+    /** Initial per-session budget when enrichMax and enrichmentBudget are not set (used by the cron env policy). */
+    enrichMaxPerSession?: number;
+    enrichBackfillDays?: number;
+    enrichmentBudget?: EnrichmentBudget;
+  } = {}
 ): Promise<AccountSyncResult> {
   const dateFrom =
     opts.dateFrom ??
@@ -121,7 +154,7 @@ export async function syncAccount(
   // New rows take priority over cached candidates; each group is newest first.
   const candidates = insertedRows.filter((row) => enrichmentCandidate(row, account.name))
     .sort((a, b) => b.booking_date.localeCompare(a.booking_date));
-  const accountLimit = enrichmentLimit(opts.enrichMax, ENRICH_MAX_PER_ACCOUNT);
+  const accountLimit = enrichmentLimit(opts.enrichMax ?? opts.enrichMaxPerAccount, ENRICH_MAX_PER_ACCOUNT);
   const backfillDays = enrichmentLimit(opts.enrichBackfillDays, ENRICH_BACKFILL_DAYS);
   if (backfillDays > 0 && accountLimit > 0 && !opts.enrichmentBudget?.stopped &&
     (opts.enrichmentBudget?.remaining ?? 1) > 0) {
@@ -160,7 +193,7 @@ export async function syncAccount(
   await db.touchAccountSynced(account.account_uid);
   // Both groups share the same caps and atomic claim. Complete the normal sync
   // first so a detail rate limit prevents all subsequent bank calls.
-  const budget = opts.enrichmentBudget ?? { remaining: enrichmentLimit(opts.enrichMax, ENRICH_MAX_PER_SESSION) };
+  const budget = opts.enrichmentBudget ?? { remaining: enrichmentLimit(opts.enrichMax ?? opts.enrichMaxPerSession, ENRICH_MAX_PER_SESSION) };
 
   let detailAttempts = 0;
   let details_fetched = 0;
@@ -222,7 +255,15 @@ export interface SyncSummary {
 export async function syncAll(
   env: Env,
   trigger: string,
-  filter: { sessionPk?: string; accountUids?: string[]; strategy?: "default" | "longest"; enrichMax?: number; enrichBackfillDays?: number } = {}
+  filter: {
+    sessionPk?: string;
+    accountUids?: string[];
+    strategy?: "default" | "longest";
+    enrichMax?: number;
+    enrichMaxPerAccount?: number;
+    enrichMaxPerSession?: number;
+    enrichBackfillDays?: number;
+  } = {}
 ): Promise<SyncSummary> {
   const db = new Db(env);
   const eb = new EbClient(env);
@@ -240,12 +281,14 @@ export async function syncAll(
     summary.sessions++;
 
     const accounts = await db.accountsBySession(session.id, filter.accountUids);
-    const enrichmentBudget: EnrichmentBudget = { remaining: enrichmentLimit(filter.enrichMax, ENRICH_MAX_PER_SESSION) };
+    const enrichmentBudget: EnrichmentBudget = {
+      remaining: enrichmentLimit(filter.enrichMax ?? filter.enrichMaxPerSession, ENRICH_MAX_PER_SESSION),
+    };
 
     for (const account of accounts) {
       try {
         const r = await syncAccount(db, eb, account, { strategy: filter.strategy, enrichMax: filter.enrichMax,
-          enrichBackfillDays: filter.enrichBackfillDays, enrichmentBudget });
+          enrichMaxPerAccount: filter.enrichMaxPerAccount, enrichBackfillDays: filter.enrichBackfillDays, enrichmentBudget });
         summary.accounts_synced++;
         summary.new_transactions += r.new_transactions;
         summary.details_fetched += r.details_fetched;
@@ -291,6 +334,44 @@ export async function syncAll(
   });
 
   return summary;
+}
+
+export interface EnrichmentPreview {
+  accounts: Array<{ account: string; candidates: number }>;
+  total_candidates: number;
+}
+
+/**
+ * Cache-only preview of what a refresh_now enrichment pass would fetch: no bank call, no budget spend,
+ * no write. Mirrors the same account/session caps and backfill window used by a real sync so the count is
+ * a faithful estimate, but only ever counts rows already in the cache.
+ */
+export async function previewEnrichmentCandidates(
+  db: Db,
+  accounts: AccountRow[],
+  opts: { enrichMax?: number; enrichBackfillDays?: number } = {}
+): Promise<EnrichmentPreview> {
+  const backfillDays = enrichmentLimit(opts.enrichBackfillDays, ENRICH_BACKFILL_DAYS);
+  const accountLimit = enrichmentLimit(opts.enrichMax, ENRICH_MAX_PER_ACCOUNT);
+  const sessionBudget = enrichmentLimit(opts.enrichMax, ENRICH_MAX_PER_SESSION);
+  const remainingBySession = new Map<string, number>();
+  const results: Array<{ account: string; candidates: number }> = [];
+  let total = 0;
+
+  for (const account of accounts) {
+    const remaining = remainingBySession.get(account.session_pk) ?? sessionBudget;
+    let count = 0;
+    if (backfillDays > 0 && accountLimit > 0 && remaining > 0) {
+      const rows = await db.enrichmentBackfillCandidates(account.account_uid, daysAgo(backfillDays));
+      const eligible = rows.filter((row) => enrichmentCandidate(row, account.name));
+      count = Math.min(eligible.length, accountLimit, remaining);
+    }
+    remainingBySession.set(account.session_pk, remaining - count);
+    results.push({ account: account.name ?? account.account_uid, candidates: count });
+    total += count;
+  }
+
+  return { accounts: results, total_candidates: total };
 }
 
 /**

@@ -3,7 +3,8 @@ import test from "node:test";
 import { createEnv, mockEnableBanking } from "./helpers.mjs";
 const { Db } = await import("../src/db.ts");
 const { EbClient } = await import("../src/eb.ts");
-const { syncAccount, syncAll, backfillAccounts, ENRICH_MAX_PER_ACCOUNT, ENRICH_MAX_PER_SESSION, ENRICH_BACKFILL_DAYS } = await import("../src/sync.ts");
+const { syncAccount, syncAll, backfillAccounts, previewEnrichmentCandidates, enrichmentPolicyFromEnv,
+  ENRICH_MAX_PER_ACCOUNT, ENRICH_MAX_PER_SESSION, ENRICH_BACKFILL_DAYS } = await import("../src/sync.ts");
 const { daysAgo } = await import("../src/util.ts");
 const { readTransactionDetails, sanitizeTransactionDetails } = await import("../src/transaction-details.ts");
 
@@ -472,4 +473,108 @@ test("backfill skips enriched, claimed, malformed and ineligible rows and stays 
   assert.equal(result.details_failed, 0);
   assert.deepEqual(detailCalls().map(c => c.path), ["/accounts/account-0-0/transactions/eligible"]);
   assert.equal(stored().find(r => r.account_uid === "account-0-1" && r.entry_reference === "ref-eligible").detail_fetched_at, null);
+});
+
+// --- enrichmentPolicyFromEnv: nightly cron config from optional, non-secret Worker vars ---
+
+test("enrichmentPolicyFromEnv falls back to the built-in recommendations when vars are missing", () => {
+  assert.deepEqual(enrichmentPolicyFromEnv({}), {
+    enrichBackfillDays: ENRICH_BACKFILL_DAYS,
+    enrichMaxPerAccount: ENRICH_MAX_PER_ACCOUNT,
+    enrichMaxPerSession: ENRICH_MAX_PER_SESSION,
+  });
+});
+
+for (const bad of ["-1", "abc", "1.5abc", "", "NaN", "-0.5"]) {
+  test(`enrichmentPolicyFromEnv falls back on invalid var: "${bad}"`, () => {
+    const policy = enrichmentPolicyFromEnv({
+      ENRICH_BACKFILL_DAYS: bad, ENRICH_MAX_PER_ACCOUNT: bad, ENRICH_MAX_PER_SESSION: bad,
+    });
+    assert.deepEqual(policy, {
+      enrichBackfillDays: ENRICH_BACKFILL_DAYS,
+      enrichMaxPerAccount: ENRICH_MAX_PER_ACCOUNT,
+      enrichMaxPerSession: ENRICH_MAX_PER_SESSION,
+    });
+  });
+}
+
+test("enrichmentPolicyFromEnv parses valid non-negative integers, including 0", () => {
+  assert.deepEqual(
+    enrichmentPolicyFromEnv({ ENRICH_BACKFILL_DAYS: "0", ENRICH_MAX_PER_ACCOUNT: "7", ENRICH_MAX_PER_SESSION: "14" }),
+    { enrichBackfillDays: 0, enrichMaxPerAccount: 7, enrichMaxPerSession: 14 }
+  );
+});
+
+test("cron threads the env policy's separate per-account and per-session caps", async t => {
+  const rows = Array.from({ length: 5 }, (_, i) => transaction(`id-${i}`));
+  const { env, detailCalls } = await setup(t, rows, { accounts: 3 });
+  const result = await syncAll(env, "cron", { enrichMaxPerAccount: 1, enrichMaxPerSession: 2, enrichBackfillDays: 45 });
+  assert.equal(result.details_fetched, 2);
+  assert.equal(detailCalls().length, 2);
+  for (let a = 0; a < 3; a++) {
+    assert.ok(detailCalls().filter(c => c.path.startsWith(`/accounts/account-0-${a}/`)).length <= 1);
+  }
+});
+
+test("enrichMax still overrides enrichMaxPerAccount/enrichMaxPerSession when both are given", async t => {
+  const rows = Array.from({ length: 5 }, (_, i) => transaction(`id-${i}`));
+  const { env, detailCalls } = await setup(t, rows, { accounts: 1 });
+  const result = await syncAll(env, "cron", { enrichMax: 4, enrichMaxPerAccount: 1, enrichMaxPerSession: 1 });
+  assert.equal(result.details_fetched, 4);
+  assert.equal(detailCalls().length, 4);
+});
+
+// --- previewEnrichmentCandidates: cache-only dry-run preview backing refresh_now's enrichment_dry_run ---
+
+test("previewEnrichmentCandidates makes no HTTP calls and performs no writes", async t => {
+  const rows = Array.from({ length: 3 }, (_, i) => transaction(`id-${i}`, [], { booking_date: daysAgo(i) }));
+  const { env, db, mock, stored } = await seedBackfill(t, rows);
+  const before = stored();
+  const callsBefore = mock.calls.length;
+  const result = await previewEnrichmentCandidates(db, await db.allAccounts());
+  assert.equal(mock.calls.length, callsBefore);
+  assert.deepEqual(stored(), before);
+  assert.equal(result.total_candidates, 3);
+  assert.deepEqual(result.accounts, [{ account: "  Account   Holder  ", candidates: 3 }]);
+});
+
+test("previewEnrichmentCandidates respects enrichBackfillDays and enrichMax", async t => {
+  const rows = [
+    transaction("outside", [], { booking_date: daysAgo(46) }),
+    transaction("boundary", [], { booking_date: daysAgo(45) }),
+    transaction("recent", [], { booking_date: daysAgo(1) }),
+  ];
+  const { db } = await seedBackfill(t, rows);
+  const accounts = await db.allAccounts();
+  const withDefaults = await previewEnrichmentCandidates(db, accounts);
+  assert.equal(withDefaults.total_candidates, 2); // boundary + recent, outside is past the 45-day window
+  const capped = await previewEnrichmentCandidates(db, accounts, { enrichMax: 1 });
+  assert.equal(capped.total_candidates, 1);
+  const disabledBackfill = await previewEnrichmentCandidates(db, accounts, { enrichBackfillDays: 0 });
+  assert.equal(disabledBackfill.total_candidates, 0);
+  const disabledMax = await previewEnrichmentCandidates(db, accounts, { enrichMax: 0 });
+  assert.equal(disabledMax.total_candidates, 0);
+});
+
+test("previewEnrichmentCandidates scopes to the accounts passed in and shares the session budget across them", async t => {
+  const rows = Array.from({ length: 5 }, (_, i) => transaction(`id-${i}`, [], { booking_date: daysAgo(i) }));
+  const { db } = await seedBackfill(t, rows, { accounts: 3 });
+  const accounts = await db.allAccounts();
+  const oneAccount = await previewEnrichmentCandidates(db, accounts.filter(a => a.account_uid === "account-0-0"), { enrichMax: 2 });
+  assert.equal(oneAccount.accounts.length, 1);
+  assert.equal(oneAccount.total_candidates, 2);
+  const allThree = await previewEnrichmentCandidates(db, accounts, { enrichMax: 2 });
+  assert.equal(allThree.accounts.length, 3);
+  assert.equal(allThree.total_candidates, 2); // shared per-session budget, not 2 per account
+});
+
+test("previewEnrichmentCandidates output is sanitized: no raw JSON, transaction ids, or account uids", async t => {
+  const rows = [transaction("secret-id", ["Account Holder"], { booking_date: daysAgo(1) })];
+  const { db } = await seedBackfill(t, rows);
+  const result = await previewEnrichmentCandidates(db, await db.allAccounts());
+  const serialized = JSON.stringify(result);
+  assert.equal(serialized.includes("secret-id"), false);
+  assert.equal(serialized.includes("account-0-0"), false);
+  assert.deepEqual(Object.keys(result).sort(), ["accounts", "total_candidates"]);
+  assert.deepEqual(Object.keys(result.accounts[0]).sort(), ["account", "candidates"]);
 });

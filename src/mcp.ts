@@ -14,7 +14,7 @@ import {
   REFRESH_BUDGET_PER_DAY,
   serializeMcpText,
 } from "./mcp-output";
-import { syncAll } from "./sync";
+import { previewEnrichmentCandidates, syncAll } from "./sync";
 import type { Env } from "./types";
 import { maskIban, matchAccountUids } from "./util";
 
@@ -23,7 +23,7 @@ const SERVER_INSTRUCTIONS = `banking-mcp is a read-only mirror of the operator's
 
 Normal order: list_accounts to resolve accounts, then get_balances or get_transactions, then export_statements for bulk history. Account uids change after every re-authorization: always match on account name or IBAN, never on a hardcoded uid.
 
-Rows whose bank text is only the account holder's own name are automatically enriched from the bank's detail record during sync (capped per night); get_transaction_details returns the cached detail for free and only calls the bank when no detail is cached yet (one bank fetch from the daily budget).
+Rows whose bank text is only the account holder's own name are automatically enriched from the bank's detail record during sync (capped per night); get_transaction_details returns the cached detail for free and only calls the bank when no detail is cached yet (one bank fetch from the daily budget). Enrichment's backfill window and per-account/per-session caps are configurable, both per refresh_now call and, for the nightly sync, via optional Worker vars — the built-in figures (45 days, 3 per account, 6 per bank session) are conservative starting recommendations, not fixed defaults or documented bank limits. Preview a run with refresh_now's enrichment_dry_run before spending live budget.
 
 refresh_now fetches transactions and balances from the bank. It is budgeted: 3 per bank per UTC day, because banks allow roughly 4 unattended fetches a day and the nightly sync reserves one. A failed attempt can still consume budget. Never call refresh_now to test connectivity.
 
@@ -216,16 +216,40 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       "refresh_now",
       {
         description:
-          "Fetch fresh bank data via Enable Banking and update the local cache; this fetches transactions and balances. Use only when fresh data is needed, never as a connectivity test. Budget: 3 per bank per UTC day; a failed attempt can still count. Supports an optional account filter.",
+          "Fetch fresh bank data via Enable Banking and update the local cache; this fetches transactions and balances. Use only when fresh data is needed, never as a connectivity test. Budget: 3 per bank per UTC day; a failed attempt can still count. Supports an optional account filter. Enrichment of own-name transfers during this refresh is configurable via enrichment_backfill_days and enrichment_max (see their descriptions for recommended values, not selected defaults); enrichment_dry_run previews candidate counts for free.",
         inputSchema: {
           account: z.string().optional().describe("Account name, IBAN, uid or bank name. Omit for all accounts."),
           strategy: z.enum(["default", "longest"]).optional().describe('"longest" asks the bank for the deepest available history (use once after a re-authorization for backfill); omit for normal refreshes.'),
+          enrichment_backfill_days: z.number().int().min(0).optional().describe(
+            "Configurable. How far back (days) to look for existing cached rows still eligible for detail enrichment. Recommended starting point: 45 (conservative), not a selected default — omit to keep the current behavior. 0 disables backfill enrichment for this call; newly fetched rows can still be enrichment candidates."
+          ),
+          enrichment_max: z.number().int().min(0).optional().describe(
+            "Configurable. Overrides both the per-account and per-bank-session enrichment detail-call caps for this call. Recommended starting point: 3 per account / 6 per bank session per run (conservative, unattended-sync recommendations — not documented bank limits) — omit to keep the current caps. 0 disables enrichment detail calls entirely for this call."
+          ),
+          enrichment_dry_run: z.boolean().optional().describe(
+            "Configurable. If true, preview only: inspects the local cache for enrichment candidates honoring enrichment_backfill_days and enrichment_max, and returns a sanitized per-account and total candidate count. Makes zero Enable Banking calls, spends zero refresh/detail budget, and writes nothing; ignores strategy."
+          ),
         },
       },
-      async ({ account, strategy }) => {
+      async ({ account, strategy, enrichment_backfill_days, enrichment_max, enrichment_dry_run }) => {
         const db = this.db();
         const uids = await this.resolveAccountUids(db, account);
         if (uids !== null && uids.length === 0) return this.text("", { error: `No account matches "${account}"` });
+
+        if (enrichment_dry_run) {
+          const allAccounts = await db.allAccounts();
+          const scoped = uids === null ? allAccounts : allAccounts.filter((a) => uids.includes(a.account_uid));
+          const preview = await previewEnrichmentCandidates(db, scoped,
+            { enrichMax: enrichment_max, enrichBackfillDays: enrichment_backfill_days });
+          return this.text(await this.warnings(db), { dry_run: true, ...preview });
+        }
+
+        // Only present in the syncAll filter when explicitly given, so an omitted call is byte-identical
+        // to the pre-existing filter shape.
+        const enrichmentOverrides = {
+          ...(enrichment_max !== undefined ? { enrichMax: enrichment_max } : {}),
+          ...(enrichment_backfill_days !== undefined ? { enrichBackfillDays: enrichment_backfill_days } : {}),
+        };
 
         const today = new Date().toISOString().slice(0, 10);
         const sessions = await db.activeSessions();
@@ -260,7 +284,8 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
             });
             continue;
           }
-          const summary = await syncAll(this.cfg, "refresh_now", { sessionPk: s.id, accountUids: sessionUids, strategy });
+          const summary = await syncAll(this.cfg, "refresh_now",
+            { sessionPk: s.id, accountUids: sessionUids, strategy, ...enrichmentOverrides });
           // An unfiltered refresh of an active session that owns no accounts is
           // not success: the account is usually not linked to the app in the
           // Enable Banking Control Panel, or the bank was authorized for the

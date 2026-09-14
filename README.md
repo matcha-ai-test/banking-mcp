@@ -185,7 +185,7 @@ Not documented yet. The CLI configuration above does not by itself configure a c
 | `list_accounts` | Cached accounts, masked IBANs, latest cached balances, and last sync time |
 | `get_balances` | Cached balances, optionally filtered by account name, last four IBAN digits, or bank |
 | `get_transactions` | Up to 500 cached transactions, pending included by default, with account, date, and text filters |
-| `refresh_now` | Live refresh from the bank, limited to 3 per bank session per UTC day and shared across all connected clients. Adds a `hint` field when a session syncs zero accounts |
+| `refresh_now` | Live refresh from the bank, limited to 3 per bank session per UTC day and shared across all connected clients. Adds a `hint` field when a session syncs zero accounts. Enrichment during the refresh is configurable (see below) and can be previewed with `enrichment_dry_run` at zero cost |
 | `get_auth_status` | Cached session metadata plus the result of the most recent verified bank call. Does not call the bank and returns no token or secret link |
 | `export_statements` | Bulk JSON export of cached booked transactions since a date, default `2025-01-01`, with a running balance per row. Can be filtered by bank and by account |
 
@@ -200,6 +200,36 @@ The Worker holds one Enable Banking session per connected bank and caches accoun
 - The first connection backfills history, trying up to 5 years and falling back to shorter windows if the bank refuses.
 - A bank consent lasts at most 180 days. Every tool response carries a warning from 14 days before expiry, and the operator renews by running `auth:link` for that bank again.
 - Full upstream payloads are not stored; only the fields the tools return are cached.
+
+### Enrichment configuration
+
+Rows whose bank text is only the account holder's own name are enriched from the bank's detail record
+during sync, within a backfill window and per-account/per-session caps. These are **configurable
+recommendations, not fixed defaults or documented bank limits**:
+
+- 45 days is a conservative starting recommendation for how far back to look for existing cached rows
+  still eligible for enrichment.
+- 3 detail calls per account and 6 per bank session per run are conservative recommendations for
+  unattended syncing, not limits documented by any bank.
+- `0` disables the relevant behavior (backfill, or enrichment detail calls entirely).
+
+Both figures can be overridden per `refresh_now` call, via its optional `enrichment_backfill_days` and
+`enrichment_max` inputs — omit them to keep the current behavior. `enrichment_dry_run: true` previews the
+candidate count for the requested scope from the local cache only: no bank call, no refresh/detail budget
+spent, no write.
+
+The nightly cron sync reads the same policy from three optional Worker vars, set with `wrangler secret put`
+or in your own `wrangler.jsonc` (they are not secrets, just configuration — kept out of this repo's
+`wrangler.jsonc` since they're deployment-specific):
+
+| Var | Meaning | Falls back to |
+|---|---|---|
+| `ENRICH_BACKFILL_DAYS` | Backfill window in days | 45 |
+| `ENRICH_MAX_PER_ACCOUNT` | Detail-call cap per account per run | 3 |
+| `ENRICH_MAX_PER_SESSION` | Detail-call cap per bank session per run | 6 |
+
+Each must be a non-negative integer; a missing or invalid value falls back to the recommendation above, so
+an unconfigured deployment behaves exactly as before.
 
 ## Example tasks
 

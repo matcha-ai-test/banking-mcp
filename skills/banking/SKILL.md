@@ -36,6 +36,10 @@ Everything is read-only **except `refresh_now`**, which spends the daily fetch b
 - `refresh_now` is budgeted (max 3/session/day; banks allow ~4 unattended fetches/day, 1 reserved for the
   nightly sync). **Never** call it just to test connectivity — use `get_auth_status` for that. Data is
   otherwise served from a local cache synced nightly.
+- `refresh_now`'s enrichment of own-name transfers is configurable, not fixed: `enrichment_backfill_days`
+  and `enrichment_max` accept overrides (45 days / 3 per account / 6 per bank session are conservative
+  starting recommendations, not selected defaults or bank-documented limits), and `enrichment_dry_run: true`
+  previews the candidate count from the cache for free before spending live budget.
 
 ## Auth & multi-bank
 - Sessions renew via bank login (BankID or the bank's own flow) on the **authorizer only**
