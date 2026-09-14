@@ -3,7 +3,8 @@ import test from "node:test";
 import { createEnv, mockEnableBanking } from "./helpers.mjs";
 const { Db } = await import("../src/db.ts");
 const { EbClient } = await import("../src/eb.ts");
-const { syncAccount, syncAll, backfillAccounts, ENRICH_MAX_PER_ACCOUNT, ENRICH_MAX_PER_SESSION } = await import("../src/sync.ts");
+const { syncAccount, syncAll, backfillAccounts, ENRICH_MAX_PER_ACCOUNT, ENRICH_MAX_PER_SESSION, ENRICH_BACKFILL_DAYS } = await import("../src/sync.ts");
+const { daysAgo } = await import("../src/util.ts");
 const { readTransactionDetails, sanitizeTransactionDetails } = await import("../src/transaction-details.ts");
 
 function transaction(id, text = ["Account Holder"], extra = {}) {
@@ -58,7 +59,7 @@ for (const [name, text, extra, expected] of [
   });
 }
 
-test("newest first, account cap, only actual inserts, and free sanitized cache reads", async t => {
+test("newest first, account cap, new inserts before backfill, and free sanitized cache reads", async t => {
   const rows = Array.from({ length: 5 }, (_, i) => transaction(`id-${i}`, [], { booking_date: `2030-01-0${i + 1}` }));
   // Include a repeated list row, and pre-insert the newest one to simulate an overlapping sync.
   const { db, sync, stored, detailCalls, mock, env } = await setup(t, [...rows, rows[3]]);
@@ -82,8 +83,8 @@ test("newest first, account cap, only actual inserts, and free sanitized cache r
   assert.equal(row.value_date, "2029-12-31");
   assert.deepEqual(JSON.parse(row.raw), { ...rows[3], detail });
   assert.ok(Number.isFinite(Date.parse(row.detail_fetched_at)));
-  assert.deepEqual(await sync(), { account_uid: "account-0-0", new_transactions: 0, pending: 0, details_fetched: 0, details_failed: 0 });
-  assert.equal(detailCalls().length, 3);
+  assert.deepEqual(await sync(), { account_uid: "account-0-0", new_transactions: 0, pending: 0, details_fetched: 2, details_failed: 0 });
+  assert.deepEqual(detailCalls().map(c => c.path.split("/").at(-1)), ["id-3", "id-2", "id-1", "id-4", "id-0"]);
   const count = mock.calls.length;
   db.tryChargeRefreshBudget = () => { throw new Error("cache must not charge"); };
   env.DB.sqlite.exec("UPDATE eb_sessions SET status = 'expired'");
@@ -139,7 +140,7 @@ test("default session cap is shared across accounts and resets for each session/
       routes[`${path}/next`] = detail;
     }
   }
-  assert.equal((await syncAll(env, "refresh")).details_fetched, 6);
+  assert.equal((await syncAll(env, "refresh")).details_fetched, ENRICH_MAX_PER_SESSION * 2);
 });
 
 for (const limit of [0, 1, 8]) {
@@ -364,4 +365,111 @@ test("failed sync HTTP releases the claim for a later tool retry", async t => {
   assert.deepEqual(result.remittance_information, detail.remittance_information);
   assert.equal(detailCalls().length, 2);
   assert.ok(stored()[0].detail_fetched_at);
+});
+
+// Existing cache rows must not depend on being returned in the next bank list.
+async function seedBackfill(t, rows, options) {
+  const fixture = await setup(t, rows, options);
+  await syncAll(fixture.env, "seed", { enrichMax: 0 });
+  for (const [path, response] of Object.entries(fixture.routes)) {
+    if (path.endsWith("/transactions")) response.transactions = [];
+  }
+  return fixture;
+}
+
+test("cron default path enriches existing eligible rows through the inclusive 45-day boundary", async t => {
+  assert.equal(ENRICH_BACKFILL_DAYS, 45);
+  const { env, stored, detailCalls } = await seedBackfill(t, [
+    transaction("outside", [], { booking_date: daysAgo(46) }),
+    transaction("boundary", ["123 456"], { booking_date: daysAgo(45) }),
+    transaction("recent", ["  ACCOUNT", " HOLDER "], { booking_date: daysAgo(1) }),
+    transaction("empty", [], { booking_date: daysAgo(2) }),
+  ]);
+  const result = await syncAll(env, "cron");
+  assert.equal(result.new_transactions, 0);
+  assert.equal(result.details_fetched, 3);
+  assert.equal(result.details_failed, 0);
+  assert.deepEqual(detailCalls().map(c => c.path.split("/").at(-1)), ["recent", "empty", "boundary"]);
+  assert.equal(stored().find(r => r.entry_reference === "ref-outside").detail_fetched_at, null);
+  assert.equal((await syncAll(env, "cron")).details_fetched, 0);
+  assert.equal(detailCalls().length, 3);
+});
+
+for (const entry of ["account", "all"]) {
+  test(`enrichBackfillDays override and zero disable only backfill via ${entry}`, async t => {
+    const { env, sync, routes, detailCalls } = await seedBackfill(t, [
+      transaction("boundary", [], { booking_date: daysAgo(2) }),
+      transaction("older", [], { booking_date: daysAgo(3) }),
+    ]);
+    const run = opts => entry === "account" ? sync(opts) : syncAll(env, "cron", opts);
+    const path = "GET /accounts/account-0-0/transactions";
+    routes[path].transactions = [transaction("new", [], { booking_date: daysAgo(60) })];
+    routes[`${path}/new`] = detail;
+    assert.equal((await run({ enrichBackfillDays: 0 })).details_fetched, 1);
+    assert.equal((await run({ enrichBackfillDays: 2, enrichMax: 0 })).details_fetched, 0);
+    assert.equal((await run({ enrichBackfillDays: 2 })).details_fetched, 1);
+    assert.deepEqual(detailCalls().map(c => c.path.split("/").at(-1)), ["new", "boundary"]);
+  });
+}
+
+for (const limit of [undefined, 1, 8]) {
+  test(`new and backfill share account/session caps, enrichMax=${limit}`, async t => {
+    const { env, routes, detailCalls } = await seedBackfill(t,
+      Array.from({ length: 10 }, (_, i) => transaction(`cached-${i}`, [], { booking_date: daysAgo(i) })),
+      { accounts: 3 });
+    for (const [path, response] of Object.entries(routes)) {
+      if (path.endsWith("/transactions")) {
+        response.transactions = [transaction("new", [], { booking_date: daysAgo(60) })];
+        routes[`${path}/new`] = detail;
+      }
+    }
+    const result = await syncAll(env, "cron", { enrichMax: limit });
+    const sessionCap = limit ?? ENRICH_MAX_PER_SESSION;
+    const accountCap = limit ?? ENRICH_MAX_PER_ACCOUNT;
+    assert.equal(result.new_transactions, 3);
+    assert.equal(result.details_fetched, sessionCap);
+    assert.equal(detailCalls().length, sessionCap);
+    for (let a = 0; a < 3; a++) {
+      const calls = detailCalls().filter(c => c.path.startsWith(`/accounts/account-0-${a}/`));
+      assert.ok(calls.length <= accountCap);
+      if (calls.length) {
+        assert.equal(calls[0].path.split("/").at(-1), "new");
+        assert.deepEqual(calls.slice(1).map(c => c.path.split("/").at(-1)),
+          Array.from({ length: calls.length - 1 }, (_, i) => `cached-${i}`));
+      }
+    }
+  });
+}
+
+test("failed new candidates are deduplicated by id before backfill dispatch", async t => {
+  const { sync, detailCalls } = await setup(t, [transaction("one", [], { booking_date: daysAgo(0) })], {
+    reply: () => new Response("unavailable", { status: 503 }),
+  });
+  const result = await sync();
+  assert.equal(result.details_failed, 1);
+  assert.equal(result.details_fetched, 0);
+  assert.equal(detailCalls().length, 1);
+});
+
+test("backfill skips enriched, claimed, malformed and ineligible rows and stays within its account", async t => {
+  const ids = ["timestamp", "detail", "claimed", "invalid", "null", "malformed", "merchant", "no-id", "eligible"];
+  const { env, db, sync, stored, detailCalls } = await seedBackfill(t,
+    ids.map(id => transaction(id, [], { booking_date: daysAgo(id === "eligible" ? 2 : 1) })),
+    { accounts: 2 });
+  const update = env.DB.sqlite.prepare("UPDATE transactions SET raw = ? WHERE entry_reference = ?");
+  env.DB.sqlite.exec("UPDATE transactions SET detail_fetched_at = '2030-01-01' WHERE entry_reference = 'ref-timestamp'");
+  for (const [id, raw] of [
+    ["detail", JSON.stringify({ ...transaction("detail", []), detail: {} })],
+    ["invalid", "{invalid JSON"], ["null", null],
+    ["malformed", JSON.stringify(transaction("malformed", 42))],
+    ["merchant", JSON.stringify(transaction("merchant", ["Example shop"]))],
+    ["no-id", JSON.stringify(transaction(null, []))],
+  ]) update.run(raw, `ref-${id}`);
+  const claimed = stored().find(r => r.account_uid === "account-0-0" && r.entry_reference === "ref-claimed");
+  assert.equal(await db.claimTransactionDetail(claimed.id, new Date().toISOString(), daysAgo(1)), true);
+  const result = await sync({ enrichMax: 1 });
+  assert.equal(result.details_fetched, 1);
+  assert.equal(result.details_failed, 0);
+  assert.deepEqual(detailCalls().map(c => c.path), ["/accounts/account-0-0/transactions/eligible"]);
+  assert.equal(stored().find(r => r.account_uid === "account-0-1" && r.entry_reference === "ref-eligible").detail_fetched_at, null);
 });

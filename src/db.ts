@@ -270,7 +270,7 @@ export class Db {
   }
 
   /** Idempotent insert; returns number of newly inserted rows. */
-  async insertTransactionsIgnore(rows: TxRow[], insertedRows?: TxRow[]): Promise<number> {
+  async insertTransactionsIgnore(rows: TxRow[], insertedRows?: Array<TxRow & { id: number }>): Promise<number> {
     if (rows.length === 0) return 0;
     const stmt = this.d1.prepare(
       `INSERT OR IGNORE INTO transactions
@@ -291,13 +291,21 @@ export class Db {
       );
       for (const [index, r] of results.entries()) {
         inserted += r.meta.changes ?? 0;
-        if (r.meta.changes > 0) insertedRows?.push(chunk[index]);
+        if (r.meta.changes > 0) insertedRows?.push({ ...chunk[index], id: r.meta.last_row_id });
       }
     }
     return inserted;
   }
 
-  /** Re-read the persisted row; newly inserted sync rows do not yet carry an id. */
+  /** Load recent cache rows; guarded JSON/text eligibility is checked by the caller. */
+  async enrichmentBackfillCandidates(accountUid: string, dateFrom: string): Promise<Array<TxRow & { id: number }>> {
+    return (await this.d1.prepare(
+      `SELECT * FROM transactions WHERE account_uid = ? AND booking_date >= ?
+       AND detail_fetched_at IS NULL ORDER BY booking_date DESC, id DESC`
+    ).bind(accountUid, dateFrom).all<TxRow & { id: number }>()).results;
+  }
+
+  /** Re-read the persisted row before detail dispatch or storage. */
   async persistedTransaction(row: TxRow): Promise<(TxRow & { id: number }) | null> {
     return this.d1.prepare("SELECT * FROM transactions WHERE account_uid = ? AND dedup_key = ?")
       .bind(row.account_uid, row.dedup_key).first<TxRow & { id: number }>();

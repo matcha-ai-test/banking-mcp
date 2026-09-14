@@ -8,6 +8,7 @@ const OVERLAP_DAYS = 10;
 const BACKOFF_HOURS = 6;
 export const ENRICH_MAX_PER_ACCOUNT = 3;
 export const ENRICH_MAX_PER_SESSION = 6;
+export const ENRICH_BACKFILL_DAYS = 45;
 
 interface EnrichmentBudget {
   remaining: number;
@@ -100,7 +101,7 @@ export async function syncAccount(
   db: Db,
   eb: EbClient,
   account: AccountRow,
-  opts: { dateFrom?: string; strategy?: "default" | "longest"; enrichMax?: number; enrichmentBudget?: EnrichmentBudget } = {}
+  opts: { dateFrom?: string; strategy?: "default" | "longest"; enrichMax?: number; enrichBackfillDays?: number; enrichmentBudget?: EnrichmentBudget } = {}
 ): Promise<AccountSyncResult> {
   const dateFrom =
     opts.dateFrom ??
@@ -108,7 +109,7 @@ export async function syncAccount(
 
   const { booked, pending } = await fetchWindow(db, eb, account, dateFrom, opts.strategy);
 
-  const insertedRows: TxRow[] = [];
+  const insertedRows: Array<TxRow & { id: number }> = [];
   let inserted = 0;
   if (booked.length > 0) {
     const rows = await Promise.all(booked.map((t) => toRow(account.account_uid, t)));
@@ -117,10 +118,22 @@ export async function syncAccount(
     inserted = await db.insertTransactionsIgnore(unique, insertedRows);
   }
 
-  // Select only rows inserted by this run, newest first.
+  // New rows take priority over cached candidates; each group is newest first.
   const candidates = insertedRows.filter((row) => enrichmentCandidate(row, account.name))
     .sort((a, b) => b.booking_date.localeCompare(a.booking_date));
   const accountLimit = enrichmentLimit(opts.enrichMax, ENRICH_MAX_PER_ACCOUNT);
+  const backfillDays = enrichmentLimit(opts.enrichBackfillDays, ENRICH_BACKFILL_DAYS);
+  if (backfillDays > 0 && accountLimit > 0 && !opts.enrichmentBudget?.stopped &&
+    (opts.enrichmentBudget?.remaining ?? 1) > 0) {
+    const seenIds = new Set(candidates.map((row) => row.id));
+    const backfill = await db.enrichmentBackfillCandidates(account.account_uid, daysAgo(backfillDays));
+    for (const row of backfill) {
+      if (!seenIds.has(row.id) && enrichmentCandidate(row, account.name)) {
+        seenIds.add(row.id);
+        candidates.push(row);
+      }
+    }
+  }
 
   // Pending: no history kept — truncate & rewrite per account (entry_reference is unstable pre-booking)
   const pendingRows = await Promise.all(pending.map((t) => toRow(account.account_uid, t)));
@@ -145,8 +158,8 @@ export async function syncAccount(
   }
 
   await db.touchAccountSynced(account.account_uid);
-  // Only successful INSERTs qualify, including when syncs overlap. Complete the
-  // normal sync first so a detail rate limit prevents all subsequent bank calls.
+  // Both groups share the same caps and atomic claim. Complete the normal sync
+  // first so a detail rate limit prevents all subsequent bank calls.
   const budget = opts.enrichmentBudget ?? { remaining: enrichmentLimit(opts.enrichMax, ENRICH_MAX_PER_SESSION) };
 
   let detailAttempts = 0;
@@ -204,11 +217,12 @@ export interface SyncSummary {
 /**
  * Sync all active sessions and their accounts. Used by cron and refresh_now.
  * enrichMax overrides both caps with the same limit; 0 disables detail calls.
+ * enrichBackfillDays overrides the cache lookback; 0 disables backfill only.
  */
 export async function syncAll(
   env: Env,
   trigger: string,
-  filter: { sessionPk?: string; accountUids?: string[]; strategy?: "default" | "longest"; enrichMax?: number } = {}
+  filter: { sessionPk?: string; accountUids?: string[]; strategy?: "default" | "longest"; enrichMax?: number; enrichBackfillDays?: number } = {}
 ): Promise<SyncSummary> {
   const db = new Db(env);
   const eb = new EbClient(env);
@@ -230,7 +244,8 @@ export async function syncAll(
 
     for (const account of accounts) {
       try {
-        const r = await syncAccount(db, eb, account, { strategy: filter.strategy, enrichMax: filter.enrichMax, enrichmentBudget });
+        const r = await syncAccount(db, eb, account, { strategy: filter.strategy, enrichMax: filter.enrichMax,
+          enrichBackfillDays: filter.enrichBackfillDays, enrichmentBudget });
         summary.accounts_synced++;
         summary.new_transactions += r.new_transactions;
         summary.details_fetched += r.details_fetched;
