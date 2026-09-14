@@ -5,6 +5,10 @@
 
 Private, read-only bank access for [Claude](https://claude.ai) and [Codex](https://openai.com/codex/), powered by [Enable Banking](https://enablebanking.com). It reads balances and transaction history from accounts you approve. **It has no bank-side write capability:** it cannot create, change, or delete bank data, move money, or initiate payments. It writes only to its own private cache.
 
+Created by **Leon Curmak**.
+
+Navigation: [Installation](#quick-start) · [Connect a client](#connecting-a-client) · [Tools](#tools) · [Configuration](#enrichment-configuration) · [Security](#security)
+
 ## Requirements
 
 - Node.js 22.15 or newer (the tests use `node:sqlite`, `--experimental-strip-types`, and `node:module` hooks) and npm.
@@ -14,6 +18,8 @@ Private, read-only bank access for [Claude](https://claude.ai) and [Codex](https
 - `openssl`, only if your Enable Banking key is PKCS#1 (starts with `-----BEGIN RSA PRIVATE KEY-----`) and needs converting.
 
 ## Quick start
+
+**A GitHub account is optional.** It is needed for the deploy-button workflow below. You can clone this public repository without an account, or download its source archive, and deploy from your terminal with a Cloudflare account.
 
 There are three ways in. Each one stops at the same place: you register the Enable Banking application yourself, then connect a bank with `auth:link`.
 
@@ -27,7 +33,7 @@ There are three ways in. Each one stops at the same place: you register the Enab
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/matcha-ai-test/banking-mcp)
 
-One click clones this repository into your own GitHub account, provisions the D1 database, KV namespace, and Durable Object, and deploys the Worker with Workers Builds CI. The deploy runs into **your** Cloudflare account with **your** own Enable Banking application; no data flows to anyone else.
+The button starts a guided deployment into your GitHub and Cloudflare accounts. Bank data is handled by your bank, Enable Banking, your deployment, and the MCP clients you authorize. The repository creator does not receive your bank data through this server.
 
 It does **not** finish configuration. The Worker needs its deployed URL before you can register the Enable Banking application, so secrets are set afterwards, not on the deploy page. Until they are, `/mcp` returns `503 Not configured` and the bank endpoints stay closed. After the deploy finishes, clone your new repository locally and run `npm run install:mcp -- --cloud` to register the application and set the secrets. Then follow [Set up Enable Banking](#set-up-enable-banking) and [Connect a bank](#connect-a-bank).
 
@@ -118,7 +124,7 @@ On the operator machine (the one holding `.dev.vars`), run:
 npm run auth:link -- --bank=<ASPSP name> --country=<ISO code>
 ```
 
-Add `--psu=business` for company accounts. The bank name must match Enable Banking's ASPSP name exactly, as shown in the Control Panel or on the [markets page](https://enablebanking.com/docs/markets). Always pass `--country`: some providers (PayPal, for example) are listed once per country, and without `--country` the server takes the first match, which can leave the session with zero accounts. If the name matches in several countries and `--country` is missing, the server answers with a "Bank exists in several countries" page that lists them.
+Add `--psu=business` for company accounts. The bank name must match Enable Banking's ASPSP name exactly, as shown in the Control Panel or on the [markets page](https://enablebanking.com/docs/markets). Always pass `--country`: some providers are listed in several countries. The server rejects an ambiguous name when the country is omitted; selecting the wrong country can leave a session with zero accounts.
 
 The command prints a link that carries the operator token in its URL fragment. Open it in a browser on any device, approve at your bank, and wait for the result page:
 
@@ -185,27 +191,28 @@ Not documented yet. The CLI configuration above does not by itself configure a c
 | `list_accounts` | Cached accounts, masked IBANs, latest cached balances, and last sync time |
 | `get_balances` | Cached balances, optionally filtered by account name, last four IBAN digits, or bank |
 | `get_transactions` | Up to 500 cached transactions, pending included by default, with account, date, and text filters |
+| `get_transaction_details` | Details for a matching transaction. Uses cached details when available; otherwise makes a budgeted bank request and caches the result |
 | `refresh_now` | Live refresh from the bank, limited to 3 per bank session per UTC day and shared across all connected clients. Adds a `hint` field when a session syncs zero accounts. Enrichment during the refresh is configurable (see below) and can be previewed with `enrichment_dry_run` at zero cost |
-| `get_auth_status` | Cached session metadata plus the result of the most recent verified bank call. Does not call the bank and returns no token or secret link |
+| `get_auth_status` | Cached session metadata by default. Optional `verify: true` checks sessions live, with a verification cooldown. Returns no token or secret link |
 | `export_statements` | Bulk JSON export of cached booked transactions since a date, default `2025-01-01`, with a running balance per row. Can be filtered by bank and by account |
 
 Bank availability is loaded live from Enable Banking. Its documentation covers country-specific Open Banking support across [EU/EEA markets](https://enablebanking.com/docs/markets); available countries, banks, and Personal/Business support can change.
 
 ## How it works
 
-The Worker holds one Enable Banking session per connected bank and caches accounts, balances, and transactions in its own D1 database. Tool calls read from that cache; they never hit the bank directly.
+The Worker caches accounts, balances, and transactions in its D1 database. Sessions are managed per bank and personal/business account type. Most tools read the cache; `refresh_now`, an uncached `get_transaction_details`, and `get_auth_status` with `verify: true` can contact Enable Banking.
 
 - A cron job syncs every active session at 04:00 UTC.
-- `refresh_now` allows 3 extra live fetches per bank per UTC day on top of the nightly sync. Banks typically permit about four unattended fetches a day.
+- Manual refreshes and uncached detail requests share a server-enforced budget of 3 per session per UTC day. Scheduled sync and its enrichment use separate controls. This application policy is not a guarantee of any bank's request allowance.
 - The first connection backfills history, trying up to 5 years and falling back to shorter windows if the bank refuses.
 - A bank consent lasts at most 180 days. Every tool response carries a warning from 14 days before expiry, and the operator renews by running `auth:link` for that bank again.
-- Full upstream payloads are not stored; only the fields the tools return are cached.
+- Upstream transaction records and fetched details are retained in the private cache. MCP responses expose selected fields and mask IBANs; protect database access and backups as sensitive bank data.
 
 ### Enrichment configuration
 
 Rows whose bank text is only the account holder's own name are enriched from the bank's detail record
 during sync, within a backfill window and per-account/per-session caps. These are **configurable
-recommendations, not fixed defaults or documented bank limits**:
+settings with recommended starting values, not documented bank limits**. Optional tool inputs have no schema defaults, but the runtime uses the values below when overrides are omitted:
 
 - 45 days is a conservative starting recommendation for how far back to look for existing cached rows
   still eligible for enrichment.
@@ -213,14 +220,11 @@ recommendations, not fixed defaults or documented bank limits**:
   unattended syncing, not limits documented by any bank.
 - `0` disables the relevant behavior (backfill, or enrichment detail calls entirely).
 
-Both figures can be overridden per `refresh_now` call, via its optional `enrichment_backfill_days` and
-`enrichment_max` inputs — omit them to keep the current behavior. `enrichment_dry_run: true` previews the
+The window can be overridden with `enrichment_backfill_days`. `enrichment_max` sets both the per-account and per-session cap to the same value for that `refresh_now` call. Omit these inputs to use the built-in fallback values. `enrichment_dry_run: true` previews the
 candidate count for the requested scope from the local cache only: no bank call, no refresh/detail budget
-spent, no write.
+spent, no write. This previews existing cached candidates; a live refresh may discover additional transactions.
 
-The nightly cron sync reads the same policy from three optional Worker vars, set with `wrangler secret put`
-or in your own `wrangler.jsonc` (they are not secrets, just configuration — kept out of this repo's
-`wrangler.jsonc` since they're deployment-specific):
+The nightly cron reads three optional, non-secret Worker variables. Set them in the `vars` section of your deployment configuration (the installer's `wrangler.local.jsonc`, if present), then deploy with `npm run deploy`. These variables configure scheduled sync, not omitted inputs on a manual `refresh_now` call:
 
 | Var | Meaning | Falls back to |
 |---|---|---|
@@ -260,7 +264,7 @@ an unconfigured deployment behaves exactly as before.
 - A Restricted Enable Banking application can access only accounts linked to it.
 - Local secrets are stored in Git-ignored `.dev.vars`; cloud secrets are uploaded as encrypted Cloudflare Worker secrets. With `--both`, the same secrets are also written to the local `.dev.vars`.
 - `.dev.vars`, `.mcp-credentials`, `wrangler.local.jsonc`, `.pem`, and `.key` files are excluded from Git.
-- Full upstream transaction payloads are not retained; only fields used by the tools are cached.
+- Upstream transaction records and fetched details are retained in D1. Tool responses are filtered and IBANs are masked; this does not remove sensitive data from the database.
 - Bank approval occurs at the bank. The server never asks for or stores your bank login credentials.
 
 To rotate the connection password or operator token: remove `MCP_SECRET` and/or `START_TOKEN` from `.dev.vars`, run `npm run install:mcp` again with the same mode flag, and reconnect your clients with the new password. To rotate the Enable Banking key: generate a new key for the application in the Control Panel and run the installer again with the new `.pem` file.
@@ -292,4 +296,4 @@ Bug reports, security reports, and pull requests are welcome. See [CONTRIBUTING.
 
 GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later). See [LICENSE](LICENSE).
 
-In short: you may use, modify and self-host this server freely, but if you distribute it or run a modified version as a network service for others, you must publish your modified source under the same license. Commits before 2026-09-13 were published under the MIT license; that grant remains valid for those versions.
+See the license text for source-distribution and remote-network interaction requirements. For an older version, consult the license included with that commit.

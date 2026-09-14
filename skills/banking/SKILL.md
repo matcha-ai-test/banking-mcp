@@ -6,14 +6,13 @@ user-invocable: true
 
 # banking-mcp usage
 
-Read-mostly access to your linked bank accounts via Enable Banking — works with **any ASPSP Enable
-Banking supports** (thousands of banks across the EEA/UK), not one specific bank. Installation,
+Read-mostly access to your linked bank accounts via Enable Banking. Availability depends on the bank,
+country, account type, and your application's access. Installation,
 credentials, and MCP registration are in [AGENTS.md](../../AGENTS.md); this skill is for day-to-day use.
-The server also ships an `instructions` field that auto-loads into context, so you don't need to explore
-the tool list.
+The server also supplies MCP instructions. How these and deferred tools are exposed depends on your client.
 
 Terminology: the **authorizer** is the trusted machine that holds the app credentials and runs the bank
-login/consent flow (`npm run auth:link`). Only the authorizer can create or renew a bank session.
+link-generation command (`npm run auth:link`). The operator opens that link in a browser and completes bank consent; the browser can be on another device.
 
 ## Find the tools in one ToolSearch
 If the tools are deferred, load exactly what you need in a single call (server name is whatever you
@@ -29,25 +28,23 @@ On claude.ai/desktop the tools sit under the connector's UUID prefix — use the
 - **Bulk export for external processing:** `export_statements` (all cached booked rows since a date, with a
   running balance; cache-only, no bank call).
 - **Fresh figures right now:** `refresh_now` — see budget below.
-- **Session health:** `get_auth_status`.
+- **Unclear transaction:** `get_transaction_details` before broader merchant research. Cached details are free; an uncached lookup consumes live-request budget.
+- **Session health:** `get_auth_status` for cached status; request `verify: true` when live verification is needed, subject to its cooldown.
 
-## Read vs write
-Everything is read-only **except `refresh_now`**, which spends the daily fetch budget.
-- `refresh_now` is budgeted (max 3/session/day; banks allow ~4 unattended fetches/day, 1 reserved for the
-  nightly sync). **Never** call it just to test connectivity — use `get_auth_status` for that. Data is
-  otherwise served from a local cache synced nightly.
+## Cache and live requests
+
+All tools are read-only toward the bank. Live operations can update the server's own cache and accounting state.
+- `refresh_now` and uncached `get_transaction_details` share a server-enforced budget of 3/session/UTC day. This is an application policy, not a documented bank limit. Scheduled sync and enrichment have separate controls. Never use `refresh_now` to test connectivity; use `get_auth_status` with `verify: true` if a live check is required.
 - `refresh_now`'s enrichment of own-name transfers is configurable, not fixed: `enrichment_backfill_days`
   and `enrichment_max` accept overrides (45 days / 3 per account / 6 per bank session are conservative
-  starting recommendations, not selected defaults or bank-documented limits), and `enrichment_dry_run: true`
+  starting recommendations and runtime fallback values, not bank-documented limits). `enrichment_max` overrides both caps with the same value. `enrichment_dry_run: true`
   previews the candidate count from the cache for free before spending live budget.
 
 ## Auth & multi-bank
-- Sessions renew via bank login (BankID or the bank's own flow) on the **authorizer only**
-  (`npm run auth:link`). No tool can renew a session. If `get_auth_status` shows expired/renewal_due,
+- Sessions renew via bank login (BankID or the bank's own flow), using a link generated on the **authorizer**
+  (`npm run auth:link`). No MCP tool can renew a session. If `get_auth_status` shows expired/renewal_due,
   ask the authorizer to run the link — don't retry blindly.
 - Add any bank Enable Banking supports: whitelist its accounts in the Enable Banking Control Panel, then
   `npm run auth:link -- --bank=<ASPSP name> --country=<ISO code>` on the authorizer. Always pass
   `--country` (some providers are listed per country).
-- If calls from one client start failing after another client was connected, reconnect that client and
-  check `get_auth_status` before trusting data. Whether only one OAuth client can be active at a time is
-  an observed pattern, not a documented limit.
+- If one client fails, check its connector authorization and the server's cached auth status before trusting data. Do not assume a one-client limit or start bank reauthorization solely because another client connected.

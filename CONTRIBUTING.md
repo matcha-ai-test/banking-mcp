@@ -15,6 +15,21 @@ npm run dev        # local Worker at http://127.0.0.1:8787
 
 `npm test` runs the suite in `test/`, and `npm run typecheck` runs `tsc --noEmit`. CI runs both plus `npm audit --audit-level=high` and `wrangler deploy --dry-run` on every push and pull request. Keep all of them green.
 
+## Repository map
+
+| Location | Responsibility |
+|---|---|
+| `src/index.ts`, `src/mcp.ts` | Worker entry point and MCP tool registration |
+| `src/eb.ts`, `src/sync.ts`, `src/transaction-details.ts` | Bank API access, cached sync, and detail enrichment |
+| `src/auth.ts`, `src/oauth.ts`, `src/auth-status.ts` | Bank authorization, client authorization, and session verification |
+| `src/db.ts`, `src/migrate.ts`, `schema.sql` | Database queries and schema setup |
+| `src/mcp-output.ts`, `src/export.ts`, `src/pages.ts` | Tool responses, statement exports, and HTTP pages |
+| `scripts/` | Installation, bank-link generation, and local/deployment commands |
+| `skills/banking/` | Client-side usage guidance |
+| `test/` | Regression tests, including authorization, budgets, and concurrent requests |
+
+Start with [README.md](README.md) for installation and configuration, [AGENTS.md](AGENTS.md) for agent-assisted installation, and [SECURITY.md](SECURITY.md) for vulnerability reporting. Keep documentation aligned with actual cache behavior, live calls, and configuration fallbacks.
+
 ## Pull requests
 
 - Branch from `main` and keep each PR focused on one change.
