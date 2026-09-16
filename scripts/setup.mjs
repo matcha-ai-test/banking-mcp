@@ -221,7 +221,7 @@ else if (args.has("--local")) mode = "local";
 else if (rl) {
   console.log(c.bold(tr("First: where should it run?", "Först: var ska servern köras?")));
   console.log(tr("  1) This computer only   (no Cloudflare account)", "  1) Endast den här datorn  (inget Cloudflare-konto)"));
-  console.log(tr("  2) Cloud only           (Claude.ai / Codex Cloud / phone)  ", "  2) Endast moln            (Claude.ai / Codex Cloud / telefon)  ") + c.bold(tr("recommended", "rekommenderas")));
+  console.log(tr("  2) Cloud only           (Claude.ai / remote clients / phone)", "  2) Endast moln            (Claude.ai / fjärrklienter / telefon)") + c.bold(tr("recommended", "rekommenderas")));
   console.log(tr("  3) Both                 (local + cloud)", "  3) Båda                   (lokalt + moln)"));
   console.log("");
   const choice = await prompt(rl, tr("Choose 1, 2 or 3", "Välj 1, 2 eller 3"), "2");

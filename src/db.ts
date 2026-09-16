@@ -476,25 +476,24 @@ export class Db {
 
   // ---- rate limit ----
 
-  /** Fixed-window rate limiter. Returns true if the action is allowed. */
+  /**
+   * Fixed-window rate limiter. Returns true if the action is allowed.
+   * One atomic upsert: a fresh or expired window resets to 1, an open window
+   * increments only while under max, so concurrent callers cannot overshoot.
+   */
   async rateLimitOk(key: string, max: number, windowMs: number): Promise<boolean> {
+    const windowSeconds = Math.ceil(windowMs / 1000);
     const row = await this.d1
-      .prepare("SELECT count, window_start FROM rate_limit WHERE key = ?")
-      .bind(key)
-      .first<{ count: number; window_start: string }>();
-    const now = Date.now();
-    if (!row || now - new Date(row.window_start + "Z").getTime() > windowMs) {
-      await this.d1
-        .prepare(
-          `INSERT INTO rate_limit (key, count, window_start) VALUES (?, 1, datetime('now'))
-           ON CONFLICT(key) DO UPDATE SET count = 1, window_start = datetime('now')`
-        )
-        .bind(key)
-        .run();
-      return true;
-    }
-    if (row.count >= max) return false;
-    await this.d1.prepare("UPDATE rate_limit SET count = count + 1 WHERE key = ?").bind(key).run();
-    return true;
+      .prepare(
+        `INSERT INTO rate_limit (key, count, window_start) VALUES (?, 1, datetime('now'))
+         ON CONFLICT(key) DO UPDATE SET
+           count = CASE WHEN window_start <= datetime('now', ?) THEN 1 ELSE count + 1 END,
+           window_start = CASE WHEN window_start <= datetime('now', ?) THEN datetime('now') ELSE window_start END
+         WHERE window_start <= datetime('now', ?) OR count < ?
+         RETURNING count`
+      )
+      .bind(key, `-${windowSeconds} seconds`, `-${windowSeconds} seconds`, `-${windowSeconds} seconds`, max)
+      .first<{ count: number }>();
+    return row !== null;
   }
 }
