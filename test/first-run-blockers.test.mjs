@@ -195,8 +195,21 @@ test("a request with no presented secret falls through to the OAuth provider", a
   assert.equal(await mcpGateDecision(mcpReq({ "x-api-key": "  " }), SECRET), "oauth");
 });
 
-test("a wrong x-api-key is rejected even next to a bearer token", async () => {
-  assert.equal(await mcpGateDecision(mcpReq({ authorization: "Bearer stale", "x-api-key": "wrong" }), SECRET), "reject");
+test("a wrong x-api-key next to a bearer still goes to the OAuth provider", async () => {
+  // claude.ai sends a Sign-in connector's configured request headers alongside
+  // the OAuth bearer, so a stale or mistyped x-api-key left on an OAuth
+  // connector must not kill every OAuth request before the token is validated.
+  assert.equal(
+    await mcpGateDecision(mcpReq({ authorization: "Bearer some-oauth-access-token", "x-api-key": "wrong" }), SECRET),
+    "oauth"
+  );
+});
+
+test("the reject path needs an API key header and no bearer", async () => {
+  assert.equal(await mcpGateDecision(mcpReq({ "x-api-key": "wrong" }), SECRET), "reject");
+  assert.equal(await mcpGateDecision(mcpReq({ "api-key": "wrong", authorization: "Bearer x" }), SECRET), "oauth");
+  // A non-Bearer Authorization scheme is not a bearer, so the reject path stands.
+  assert.equal(await mcpGateDecision(mcpReq({ "x-api-key": "wrong", authorization: "Basic x" }), SECRET), "reject");
 });
 
 test("a correct credential is allowed in either header", async () => {

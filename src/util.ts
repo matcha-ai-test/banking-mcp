@@ -143,15 +143,22 @@ export function presentedSecrets(request: Request): string[] {
  * What the /mcp shared-secret gate should do with a request.
  *
  * - "allow": a presented credential matches MCP_SECRET.
- * - "reject": an API key header was presented and nothing matched. The caller
- *   answers 401 with a plain body and no WWW-Authenticate, so a claude.ai
- *   "No sign-in" connector reports a wrong password instead of turning a typo
- *   into an OAuth sign-in loop.
+ * - "reject": an API key header was presented, no Authorization bearer was, and
+ *   nothing matched. The caller answers 401 with a plain body and no
+ *   WWW-Authenticate, so a claude.ai "No sign-in" connector reports a wrong
+ *   password instead of turning a typo into an OAuth sign-in loop.
  * - "oauth": hand the request to the OAuth provider. This covers a request with
- *   no credentials at all and, importantly, a bare `Authorization: Bearer`,
- *   which is how a real OAuth client presents its access token: only the
- *   provider can tell a valid token from an invalid one, so a bearer that does
- *   not happen to be MCP_SECRET must never be rejected here.
+ *   no credentials at all and every request carrying a bearer, which is how a
+ *   real OAuth client presents its access token: only the provider can tell a
+ *   valid token from an invalid one, so a bearer that does not happen to be
+ *   MCP_SECRET must never be rejected here.
+ *
+ * The bearer therefore decides which path a non-matching request takes. A
+ * "No sign-in" connector cannot send `Authorization` at all, which is the whole
+ * reason the API key headers exist, while claude.ai sends a Sign-in connector's
+ * configured request headers alongside the OAuth bearer. Rejecting on the API
+ * key header alone would mean a stale or mistyped `x-api-key` left on an OAuth
+ * connector killed every OAuth request before the provider ever saw the token.
  */
 export type McpGateDecision = "allow" | "reject" | "oauth";
 
@@ -159,9 +166,7 @@ export async function mcpGateDecision(request: Request, expected: string | undef
   for (const candidate of presentedSecrets(request)) {
     if (await secretsMatch(candidate, expected)) return "allow";
   }
-  // Only the API key headers are exclusive to the shared-secret path; claude.ai
-  // offers them precisely because "No sign-in" connectors cannot send a bearer.
-  return apiKeyFrom(request) ? "reject" : "oauth";
+  return apiKeyFrom(request) && !bearerFrom(request) ? "reject" : "oauth";
 }
 
 /** 401 for a presented-but-wrong connection password. Deliberately carries no WWW-Authenticate. */
