@@ -41,11 +41,14 @@ export async function handleAuthSession(request: Request, env: Env): Promise<Res
   }
   // Secure only over https: Safari drops Secure cookies on plain-http loopback,
   // which would make local mode (http://127.0.0.1:8787) loop on the gate page.
+  // SameSite=Strict: the gate page reloads same-site, so the cookie still
+  // arrives there, but a cross-site top-level link cannot ride the cookie to
+  // /auth/start and spend a bank authorization on the operator's behalf.
   const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
   return new Response(null, {
     status: 204,
     headers: {
-      "Set-Cookie": `${AUTH_COOKIE_NAME}=${await mintAuthCookie(env.START_TOKEN!)}; Path=/auth; Max-Age=${Math.floor(AUTH_COOKIE_TTL_MS / 1000)}; HttpOnly${secure}; SameSite=Lax`,
+      "Set-Cookie": `${AUTH_COOKIE_NAME}=${await mintAuthCookie(env.START_TOKEN!)}; Path=/auth; Max-Age=${Math.floor(AUTH_COOKIE_TTL_MS / 1000)}; HttpOnly${secure}; SameSite=Strict`,
       "Cache-Control": "no-store",
       "Referrer-Policy": "no-referrer",
     },

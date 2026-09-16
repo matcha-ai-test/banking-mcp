@@ -51,7 +51,7 @@ test("auth/session: right token over https sets a Secure, HttpOnly, /auth-scoped
   assert.match(cookie, /^banking_auth=/);
   assert.match(cookie, /HttpOnly/);
   assert.match(cookie, /Path=\/auth/);
-  assert.match(cookie, /SameSite=Lax/);
+  assert.match(cookie, /SameSite=Strict/);
   assert.match(cookie, /Secure/);
 });
 
