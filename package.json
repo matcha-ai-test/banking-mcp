@@ -39,7 +39,7 @@
     "@cloudflare/workers-oauth-provider": "^0.10.3",
     "@modelcontextprotocol/sdk": "1.30.0",
     "agents": "^0.22.0",
-    "jose": "^6.2.10",
+    "jose": "^6.2.12",
     "zod": "^4.5.4"
   },
   "devDependencies": {
