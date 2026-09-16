@@ -16,10 +16,12 @@ import { stdin as stdinStream, stdout as stdoutStream } from "node:process";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { writeClientCredentials } from "./lib/credentials.mjs";
+import { PreflightError, runPreflight } from "./lib/eb-preflight.mjs";
 import {
   ensureLocalWranglerConfig,
   localWranglerConfig,
   readBaseUrl,
+  readWorkerNames,
   selectWranglerConfig,
   trackedWranglerConfig,
   writeLocalBaseUrl,
@@ -33,6 +35,8 @@ const LOCAL_URL = "http://127.0.0.1:8787";
 const args = new Set(process.argv.slice(2));
 const optionValue = (name) => process.argv.slice(2).find((arg) => arg.startsWith(`${name}=`))?.slice(name.length + 1) ?? "";
 const wantPrint = args.has("--print");
+const skipPreflight = args.has("--skip-preflight");
+const workerNameArg = optionValue("--worker-name");
 const nonInteractive = args.has("--yes") || !stdinStream.isTTY;
 const langArg = process.argv.slice(2).find((arg) => arg.startsWith("--lang="))?.slice(7);
 // Documentation and pages are in English.
@@ -238,7 +242,24 @@ let cloudUrl = existing.CLOUD_URL || configuredCloudUrl();
 if (wantCloud) {
   console.log("");
   console.log(c.bold("Cloudflare"));
-  ensureLocalWranglerConfig(ROOT);
+  // The tracked wrangler.jsonc hardcodes one Worker and one D1 name; the names
+  // are chosen here, once, when wrangler.local.jsonc is first created, so a
+  // second install in the same Cloudflare account does not overwrite the first.
+  const alreadyConfigured = existsSync(localWranglerConfig(ROOT));
+  try {
+    ensureLocalWranglerConfig(ROOT, { workerName: workerNameArg });
+  } catch (e) {
+    fail(e.message);
+  }
+  const names = readWorkerNames(localWranglerConfig(ROOT));
+  console.log(`Worker name:   ${names.workerName}`);
+  console.log(`D1 database:   ${names.databaseName}`);
+  if (alreadyConfigured && workerNameArg && workerNameArg !== names.workerName) {
+    console.log(
+      c.yellow("!") +
+        ` wrangler.local.jsonc already exists, so --worker-name=${workerNameArg} was ignored. Delete that file to choose new names.`
+    );
+  }
   if (cloudUrl) writeLocalBaseUrl(ROOT, cloudUrl);
   ensureCloudLoggedIn();
 
@@ -292,6 +313,23 @@ if (!pem) {
   fail(tr("Missing private key. Pass the downloaded .pem path to setup.", "Den privata nyckeln saknas. Ange sökvägen till den nedladdade .pem-filen."));
 }
 pem = normalizePem(pem);
+
+// Verify the Application ID and the key belong together before anything is
+// written or deployed. A mismatch is Enable Banking's 401 "Wrong signature",
+// which otherwise only shows up much later as a generic "Internal error".
+if (skipPreflight) {
+  console.log(c.dim("Skipping the Enable Banking credential check (--skip-preflight)."));
+} else {
+  try {
+    await runPreflight(appId, pem, {
+      log: (line) => console.log(c.green("✓") + ` ${line}`),
+      warn: (line) => console.log(c.yellow("!") + ` ${line}`),
+    });
+  } catch (e) {
+    if (e instanceof PreflightError) fail(e.message);
+    throw e;
+  }
+}
 
 const mcpSecret = existing.MCP_SECRET || randomBytes(24).toString("hex");
 const startToken = existing.START_TOKEN || randomBytes(16).toString("hex");

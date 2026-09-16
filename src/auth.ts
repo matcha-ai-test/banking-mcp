@@ -14,6 +14,34 @@ function authPage(title: string, body: string, status = 200): Response {
   return pageResponse({ title, body, status });
 }
 
+/** EbClient reports upstream failures as "Enable Banking request failed (<status>)". */
+function ebStatus(error: unknown): number | null {
+  const m = error instanceof Error ? error.message.match(/Enable Banking request failed \((\d{3})\)/) : null;
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * A key/Application ID mismatch is Enable Banking's 401 "Wrong signature", and
+ * without this it surfaced as a bare "Internal error". Only the status is ever
+ * shown: response bodies from the bank API do not belong on an operator page.
+ */
+export function enableBankingErrorPage(error: unknown): Response {
+  const status = ebStatus(error);
+  console.warn("Enable Banking call failed", { name: (error as Error)?.name, status });
+  if (status === 401) {
+    return authPage(
+      "Enable Banking rejected the signature",
+      `<h1>Enable Banking rejected the signature</h1><p>Enable Banking answered <code>401</code>: the request was signed with a private key that does not match the configured Application ID.</p><p>The Application ID is the UUID on the application's page in the Enable Banking Control Panel, and the downloaded key file is usually named after it. Check that the ID and the <code>.pem</code> file belong to the same application, then run <code>npm run install:mcp</code> again with the matching pair.</p>`,
+      502
+    );
+  }
+  return authPage(
+    "Enable Banking request failed",
+    `<h1>Enable Banking request failed${status ? ` (${status})` : ""}</h1><p>The call to Enable Banking did not succeed. Try the bank link again; if it continues, check the Application ID, the private key, and that the application is activated in the Enable Banking Control Panel.</p>`,
+    502
+  );
+}
+
 function operatorAuthorized(request: Request, env: Env): Promise<boolean> {
   return verifyAuthCookie(cookieFrom(request, AUTH_COOKIE_NAME), env.START_TOKEN);
 }
@@ -84,7 +112,12 @@ export async function handleAuthStart(request: Request, env: Env): Promise<Respo
   }
 
   const eb = new EbClient(env);
-  const aspsps: Aspsp[] = country ? await eb.getAspsps(country) : await eb.getAspsps();
+  let aspsps: Aspsp[];
+  try {
+    aspsps = country ? await eb.getAspsps(country) : await eb.getAspsps();
+  } catch (e) {
+    return enableBankingErrorPage(e);
+  }
   const matches = aspsps.filter(
     (a) => a.name.toLowerCase() === bankParam.toLowerCase() && (!country || a.country.toUpperCase() === country)
   );
@@ -120,14 +153,19 @@ export async function handleAuthStart(request: Request, env: Env): Promise<Respo
   const state = crypto.randomUUID();
   await db.insertAuthState(state, psuType);
 
-  const auth = await eb.startAuth({
-    validUntil,
-    state,
-    redirectUrl: `${url.origin}/auth/callback`,
-    psuType,
-    aspspName: bank.name,
-    aspspCountry: bank.country,
-  });
+  let auth: { url: string };
+  try {
+    auth = await eb.startAuth({
+      validUntil,
+      state,
+      redirectUrl: `${url.origin}/auth/callback`,
+      psuType,
+      aspspName: bank.name,
+      aspspCountry: bank.country,
+    });
+  } catch (e) {
+    return enableBankingErrorPage(e);
+  }
   return new Response(null, {
     status: 302,
     headers: { Location: auth.url, "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" },
