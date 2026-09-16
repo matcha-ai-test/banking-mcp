@@ -6,9 +6,19 @@ import { rateLimitKey, secretsMatch } from "./util";
 
 const AUTHORIZE_ATTEMPTS_PER_HOUR = 10;
 
-function consentForm(clientName: string, failed = false): Response {
+/** Origin of the client's redirect_uri, allowed as a CSP form-action target. */
+function redirectOrigin(redirectUri: string | undefined): string[] {
+  try {
+    const url = new URL(redirectUri ?? "");
+    return url.protocol === "https:" || url.protocol === "http:" ? [url.origin] : [];
+  } catch {
+    return [];
+  }
+}
+
+function consentForm(clientName: string, redirectUri: string | undefined, failed = false): Response {
   const body = `<h1>Approve the banking-mcp connection</h1><p>Client <code>${esc(clientName)}</code> is asking for <strong>read-only</strong> access to your linked bank data. banking-mcp has no bank-side write functions.</p>${failed ? '<p class="err" role="alert">Wrong connection password. Try again.</p>' : ""}<form method="POST" autocomplete="off"><label for="password">Connection password</label><input id="password" type="password" name="password" autocomplete="current-password" autofocus required><div class="actions"><button type="submit">Approve</button></div></form><p class="hint">Only the operator can approve. The installer stores this password in local <code>.dev.vars</code> or as an encrypted Cloudflare Worker secret.</p>`;
-  return pageResponse({ title: "Approve connection", body, status: failed ? 401 : 200 });
+  return pageResponse({ title: "Approve connection", body, status: failed ? 401 : 200, formActionOrigins: redirectOrigin(redirectUri) });
 }
 
 /**
@@ -27,7 +37,7 @@ export async function handleAuthorize(request: Request, env: Env & { OAUTH_PROVI
   }
 
   if (request.method === "GET") {
-    return consentForm(oauthReq.clientId);
+    return consentForm(oauthReq.clientId, oauthReq.redirectUri);
   }
   if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
 
@@ -39,7 +49,7 @@ export async function handleAuthorize(request: Request, env: Env & { OAUTH_PROVI
   const form = await request.formData();
   const password = form.get("password")?.toString() ?? "";
   if (!(await secretsMatch(password, env.MCP_SECRET))) {
-    return consentForm(oauthReq.clientId, true);
+    return consentForm(oauthReq.clientId, oauthReq.redirectUri, true);
   }
 
   const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
@@ -48,6 +58,15 @@ export async function handleAuthorize(request: Request, env: Env & { OAUTH_PROVI
     metadata: { approvedAt: new Date().toISOString() },
     scope: oauthReq.scope ?? [],
     props: { user: "operator" },
+  });
+  // Secret-free evidence that the redirect was emitted, so a stuck client can
+  // be told apart from a server that never issued the code. The code and the
+  // state value are never logged.
+  const redirectUrl = new URL(redirectTo);
+  console.log("authorize: redirect issued", {
+    host: redirectUrl.host,
+    hasState: redirectUrl.searchParams.has("state"),
+    hasIss: redirectUrl.searchParams.has("iss"),
   });
   return Response.redirect(redirectTo, 302);
 }

@@ -7,7 +7,7 @@ import { homePage, privacyPage, termsPage } from "./pages";
 import { isConfigured } from "./settings";
 import { enrichmentPolicyFromEnv, syncAll } from "./sync";
 import type { Env } from "./types";
-import { bearerFrom, secretsMatch } from "./util";
+import { presentedSecrets, secretsMatch } from "./util";
 
 export { BankingMCP };
 
@@ -82,9 +82,13 @@ export default {
       if (!isConfigured(resolved)) {
         return new Response("Not configured. Run npm run install:mcp from the repository.", { status: 503 });
       }
-      const bearer = bearerFrom(request);
-      if (bearer && (await secretsMatch(bearer, resolved.MCP_SECRET))) {
-        return mcpHandler.fetch(request, resolved, ctx);
+      // Bearer for Codex and CLI clients, an API key header for claude.ai
+      // "No sign-in" connectors (which reserve Authorization). Both are
+      // compared timing-safely against MCP_SECRET.
+      for (const presented of presentedSecrets(request)) {
+        if (await secretsMatch(presented, resolved.MCP_SECRET)) {
+          return mcpHandler.fetch(request, resolved, ctx);
+        }
       }
     }
 
