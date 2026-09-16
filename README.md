@@ -85,6 +85,20 @@ The installer stores the MCP URL and connection password (`MCP_SECRET`) in Git-i
 
 Cloud setup keeps the tracked `wrangler.jsonc` template unchanged by writing discovered deployment values to Git-ignored `wrangler.local.jsonc`; `npm run dev` and `npm run deploy` select that local config automatically when it exists.
 
+### Naming the Worker and the database
+
+The tracked template names the Worker `banking-mcp` and the D1 database `banking-mcp-db`, so a second install in the same Cloudflare account would overwrite the first. Pass `--worker-name` on the first cloud install to choose different names; the database name is derived as `<name>-db`, and both are printed before anything is deployed.
+
+```bash
+npm run install:mcp -- --cloud --worker-name=banking-mcp-personal
+```
+
+The names are fixed when `wrangler.local.jsonc` is created. To change them later, delete that file and install again. Worker names are lowercase letters, digits and hyphens.
+
+### Credential preflight
+
+Before any secret is written, the installer signs the same RS256 token the Worker uses and calls Enable Banking's `/application` endpoint. A mismatched Application ID and private key is Enable Banking's 401 "Wrong signature", and catching it here avoids a working-looking install that fails on the first bank call. On success it prints the application name and environment, and warns when the application is not active. Skip the check with `--skip-preflight`.
+
 For a non-interactive agent resuming after Enable Banking registration:
 
 ```bash

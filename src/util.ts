@@ -139,6 +139,39 @@ export function presentedSecrets(request: Request): string[] {
   return [bearerFrom(request), apiKeyFrom(request)].filter((v): v is string => Boolean(v));
 }
 
+/**
+ * What the /mcp shared-secret gate should do with a request.
+ *
+ * - "allow": a presented credential matches MCP_SECRET.
+ * - "reject": an API key header was presented and nothing matched. The caller
+ *   answers 401 with a plain body and no WWW-Authenticate, so a claude.ai
+ *   "No sign-in" connector reports a wrong password instead of turning a typo
+ *   into an OAuth sign-in loop.
+ * - "oauth": hand the request to the OAuth provider. This covers a request with
+ *   no credentials at all and, importantly, a bare `Authorization: Bearer`,
+ *   which is how a real OAuth client presents its access token: only the
+ *   provider can tell a valid token from an invalid one, so a bearer that does
+ *   not happen to be MCP_SECRET must never be rejected here.
+ */
+export type McpGateDecision = "allow" | "reject" | "oauth";
+
+export async function mcpGateDecision(request: Request, expected: string | undefined): Promise<McpGateDecision> {
+  for (const candidate of presentedSecrets(request)) {
+    if (await secretsMatch(candidate, expected)) return "allow";
+  }
+  // Only the API key headers are exclusive to the shared-secret path; claude.ai
+  // offers them precisely because "No sign-in" connectors cannot send a bearer.
+  return apiKeyFrom(request) ? "reject" : "oauth";
+}
+
+/** 401 for a presented-but-wrong connection password. Deliberately carries no WWW-Authenticate. */
+export function wrongPasswordResponse(): Response {
+  return new Response("Wrong connection password", {
+    status: 401,
+    headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" },
+  });
+}
+
 export function isoDate(d: Date): string {
   return d.toISOString().slice(0, 10);
 }

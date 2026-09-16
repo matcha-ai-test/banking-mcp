@@ -16,6 +16,28 @@ function redirectOrigin(redirectUri: string | undefined): string[] {
   }
 }
 
+/**
+ * A bare "Invalid OAuth request" tells the operator nothing, and the most
+ * common cause is a client_id that is an https URL (claude.ai's "Use Claude's
+ * published identity") whose metadata document could not be resolved. The
+ * provider's own message names the check that failed and carries no secrets and
+ * no request headers. It can echo values from the client's metadata document,
+ * so it is escaped and served under the page's strict nonce CSP; it is plain
+ * reflected text on a 400, never markup.
+ */
+function invalidRequestPage(url: URL, error: unknown): Response {
+  const detail = error instanceof Error && error.message ? error.message : "";
+  const clientId = url.searchParams.get("client_id") ?? "";
+  const cimdHint = /^https:\/\//i.test(clientId)
+    ? `<p>The client identified itself with an https URL, which means it is using a client ID metadata document. If this keeps failing, switch the connector's client option to <strong>Register automatically</strong> (dynamic client registration) and try again.</p>`
+    : "";
+  return pageResponse({
+    title: "Invalid OAuth request",
+    body: `<h1>Invalid OAuth request</h1>${detail ? `<p class="err">${esc(detail)}</p>` : ""}${cimdHint}<p class="hint">Nothing was approved and no access was granted.</p>`,
+    status: 400,
+  });
+}
+
 function consentForm(clientName: string, redirectUri: string | undefined, failed = false): Response {
   const body = `<h1>Approve the banking-mcp connection</h1><p>Client <code>${esc(clientName)}</code> is asking for <strong>read-only</strong> access to your linked bank data. banking-mcp has no bank-side write functions.</p>${failed ? '<p class="err" role="alert">Wrong connection password. Try again.</p>' : ""}<form method="POST" autocomplete="off"><label for="password">Connection password</label><input id="password" type="password" name="password" autocomplete="current-password" autofocus required><div class="actions"><button type="submit">Approve</button></div></form><p class="hint">Only the operator can approve. The installer stores this password in local <code>.dev.vars</code> or as an encrypted Cloudflare Worker secret.</p>`;
   return pageResponse({ title: "Approve connection", body, status: failed ? 401 : 200, formActionOrigins: redirectOrigin(redirectUri) });
@@ -32,8 +54,8 @@ export async function handleAuthorize(request: Request, env: Env & { OAUTH_PROVI
   let oauthReq: AuthRequest;
   try {
     oauthReq = await env.OAUTH_PROVIDER.parseAuthRequest(parseReq);
-  } catch {
-    return pageResponse({ title: "Invalid OAuth request", body: "<h1>Invalid OAuth request</h1>", status: 400 });
+  } catch (e) {
+    return invalidRequestPage(url, e);
   }
 
   if (request.method === "GET") {
