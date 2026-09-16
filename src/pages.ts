@@ -14,7 +14,14 @@ export function esc(value: string): string {
   return value.replace(/[&<>"']/g, (character) => map[character]);
 }
 
-export function pageResponse(opts: { title: string; body: string; status?: number }): Response {
+/**
+ * `formActionOrigins`: extra origins the page's form may submit to. Chrome
+ * applies CSP form-action to the redirect that follows a form POST, so the
+ * OAuth consent page must allow the client's redirect_uri origin or the 302
+ * back to claude.ai is silently blocked (issue #14).
+ */
+export function pageResponse(opts: { title: string; body: string; status?: number; formActionOrigins?: string[] }): Response {
+  const formAction = ["'self'", ...(opts.formActionOrigins ?? [])].join(" ");
   const nonce = crypto.randomUUID().replace(/-/g, "");
   const body = opts.body.replace(/<script(?=>)/g, `<script nonce="${nonce}"`);
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(opts.title)}</title><style nonce="${nonce}">${CSS}</style></head><body><main>${body}</main></body></html>`;
@@ -23,7 +30,7 @@ export function pageResponse(opts: { title: string; body: string; status?: numbe
     headers: {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-store",
-      "Content-Security-Policy": `default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`,
+      "Content-Security-Policy": `default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; connect-src 'self'; form-action ${formAction}; frame-ancestors 'none'; base-uri 'none'`,
       "Referrer-Policy": "no-referrer",
       "X-Content-Type-Options": "nosniff",
       "X-Frame-Options": "DENY",

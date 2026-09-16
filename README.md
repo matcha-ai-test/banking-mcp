@@ -159,7 +159,24 @@ Take `MCP_URL` and `CONNECTION_PASSWORD` from `.mcp-credentials`. Never commit e
 
 ### Claude (remote connector)
 
-Add the `/mcp` URL as a custom connector. The server runs its own OAuth flow and opens an approval page; enter `CONNECTION_PASSWORD` there.
+There are two ways to authenticate the connector. Both send the same `CONNECTION_PASSWORD`.
+
+**Option A: No sign-in with a request header (recommended for now)**
+
+1. Add the `/mcp` URL as a custom connector and set Authentication to **No sign-in**.
+2. Add a request header named `x-api-key` with the value of `CONNECTION_PASSWORD` from `.mcp-credentials`.
+3. Click Connect.
+4. Verify by asking Claude to call `list_accounts`.
+
+No browser redirect is involved, so none can fail.
+
+**Option B: Sign in (OAuth)**
+
+1. Add the `/mcp` URL as a custom connector and set Authentication to **Sign in now**.
+2. Under OAuth client choose **Register automatically** (DCR). The server does not serve a client ID metadata document, so "Use Claude's published identity" does not apply.
+3. Click Add, then Connect. The server opens its approval page in the same tab; enter `CONNECTION_PASSWORD` there and press Approve. Claude then exchanges the code and attaches the connector.
+
+Deployments made before 2026-09-16 blocked this flow in Chrome: the approval page sent a `Content-Security-Policy` with `form-action 'self'`, which Chrome also applies to the redirect that follows the form POST, so the browser dropped the 302 back to claude.ai and Claude restarted the flow indefinitely ([issue #14](https://github.com/matcha-ai-test/banking-mcp/issues/14)). The page now allows the client's redirect origin. If you deployed earlier and see the approval page reappear after Approve, pull and redeploy, or use option A.
 
 Approving the connector only proves the connection password. Ask Claude to call `list_accounts`: the connection is complete when it returns at least one account. An empty list means no bank session exists yet or the session returned no accounts.
 
@@ -259,7 +276,7 @@ an unconfigured deployment behaves exactly as before.
 ## Security
 
 - No bank-side write tools, transfers, or payments exist in this server.
-- `/mcp` requires the generated connection password (`MCP_SECRET`).
+- `/mcp` requires the generated connection password (`MCP_SECRET`), accepted either as `Authorization: Bearer <password>` or in one of the request headers claude.ai allows: `x-api-key`, `api-key`, `apikey`, `x-apikey`, `x-api-token`, `api-token`, or `x-auth-token`.
 - `/auth/start` requires the operator token (`START_TOKEN`), carried in the link fragment and exchanged for a short-lived cookie.
 - A Restricted Enable Banking application can access only accounts linked to it.
 - Local secrets are stored in Git-ignored `.dev.vars`; cloud secrets are uploaded as encrypted Cloudflare Worker secrets. With `--both`, the same secrets are also written to the local `.dev.vars`.

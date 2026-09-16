@@ -106,6 +106,39 @@ export function bearerFrom(request: Request): string | null {
   return m ? m[1].trim() : null;
 }
 
+/**
+ * claude.ai reserves `Authorization` in its custom connector header picker, so
+ * a "No sign-in" connector cannot send a bearer token. These are the names it
+ * offers instead, and the connection password may arrive in any of them.
+ */
+const API_KEY_HEADERS = [
+  "x-api-key",
+  "api-key",
+  "apikey",
+  "x-apikey",
+  "x-api-token",
+  "api-token",
+  "x-auth-token",
+] as const;
+
+/** The first non-empty API key header, or null when none carries a value. */
+export function apiKeyFrom(request: Request): string | null {
+  for (const name of API_KEY_HEADERS) {
+    const trimmed = (request.headers.get(name) ?? "").trim();
+    if (trimmed) return trimmed;
+  }
+  return null;
+}
+
+/**
+ * Every credential the request carries, bearer first. A client can send both:
+ * claude.ai keeps a stale OAuth bearer alongside a freshly configured API key
+ * header, so the gate has to consider each candidate rather than only the first.
+ */
+export function presentedSecrets(request: Request): string[] {
+  return [bearerFrom(request), apiKeyFrom(request)].filter((v): v is string => Boolean(v));
+}
+
 export function isoDate(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
