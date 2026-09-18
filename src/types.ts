@@ -43,6 +43,21 @@ export interface AccountRow {
   psu_type: PsuType;
   product: string | null;
   last_synced_at: string | null;
+  /** Metadata from the session response; all optional so older rows and fixtures stay valid. */
+  cash_account_type?: string | null;
+  credit_limit_cents?: number | null;
+  usage?: string | null;
+  bic?: string | null;
+  /** Last four digits of a card number (CPAN) when the account is a card; never the full PAN. */
+  card_last4?: string | null;
+}
+
+export interface AspspRow {
+  name: string;
+  country: string;
+  psu_types: string | null;
+  maximum_consent_validity: number | null;
+  fetched_at: string;
 }
 
 export interface TxRow {
@@ -93,9 +108,14 @@ export interface EbBalance {
 export interface EbAccount {
   uid: string;
   account_id?: { iban?: string | null } | null;
+  all_account_ids?: Array<{ identification?: string | null; scheme_name?: string | null }> | null;
+  account_servicer?: { bic_fi?: string | null } | null;
   currency?: string | null;
   name?: string | null;
   details?: string | null;
   product?: string | null;
+  cash_account_type?: string | null;
+  credit_limit?: { currency?: string | null; amount?: string | null } | null;
+  usage?: string | null;
   [k: string]: unknown;
 }

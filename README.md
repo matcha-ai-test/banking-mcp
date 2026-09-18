@@ -226,8 +226,13 @@ Not documented yet. The CLI configuration above does not by itself configure a c
 | `refresh_now` | Live refresh from the bank, limited to 3 per bank session per UTC day and shared across all connected clients. Adds a `hint` field when a session syncs zero accounts. Enrichment during the refresh is configurable (see below) and can be previewed with `enrichment_dry_run` at zero cost |
 | `get_auth_status` | Cached session metadata by default. Optional `verify: true` checks sessions live, with a verification cooldown. Returns no token or secret link |
 | `export_statements` | Bulk JSON export of cached booked transactions since a date, default `2025-01-01`, with a running balance per row. Can be filtered by bank and by account |
+| `spending_summary` | Server-side totals of cached booked transactions per currency, grouped by month, counterparty, or account. Use it for sums and breakdowns so the model never adds up rows itself |
+| `amount_as_work_time` | Expresses an amount as hours of work from an explicit monthly net income or an estimate from cached inflows. A reflection aid, not advice |
+| `list_banks` | Banks Enable Banking supports, with country and personal/business support, from a local cache refreshed weekly by the nightly sync and on every `auth:link`. Finds the exact ASPSP name for `auth:link` |
 
-Bank availability is loaded live from Enable Banking. Its documentation covers country-specific Open Banking support across [EU/EEA markets](https://enablebanking.com/docs/markets); available countries, banks, and Personal/Business support can change.
+`list_accounts` also shows account metadata the bank supplied at link time (account type, usage, BIC, credit limit, and the last four digits of a card number); fields a bank did not supply are omitted. `get_transactions` accepts `compact: true` to drop null and empty fields from each row.
+
+Bank availability comes from Enable Banking: live during `auth:link`, and from the local `list_banks` cache in clients. Its documentation covers country-specific Open Banking support across [EU/EEA markets](https://enablebanking.com/docs/markets); available countries, banks, and Personal/Business support can change.
 
 ## How it works
 
@@ -282,7 +287,7 @@ an unconfigured deployment behaves exactly as before.
 | "Connected, but no accounts" | The account is not linked to the application under Restricted access, or the bank was chosen for the wrong country | Link the account in the Control Panel, then rerun `auth:link` with `--country` |
 | `503 Not configured` on `/mcp` | Secrets are missing on the Worker | Run `npm run install:mcp -- --cloud` from the cloned repository |
 | "Deploy succeeded but no workers.dev URL was printed" | New Cloudflare account without a `workers.dev` subdomain | Register the subdomain under Workers & Pages in the dashboard and rerun |
-| "Unknown bank" page | The name does not match Enable Banking's ASPSP name, or `--country` is missing | Copy the exact ASPSP name from the Control Panel and pass `--country` |
+| "Unknown bank" page | The name does not match Enable Banking's ASPSP name, or `--country` is missing | Ask the client to call `list_banks`, or copy the exact ASPSP name from the Control Panel, and pass `--country` |
 | "Bank exists in several countries" page | The name matches in more than one country | Rerun `auth:link` with `--country=<ISO code>` |
 | Connector approved but `list_accounts` is empty | No bank session exists yet | Run `auth:link` and complete the bank approval |
 | "session expires in N days" in tool responses | The bank consent is about to expire | Run `auth:link` for that bank again; the new session replaces the old one |

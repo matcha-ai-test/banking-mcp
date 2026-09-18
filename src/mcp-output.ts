@@ -67,3 +67,30 @@ export function buildAuthStatus(
 export function serializeMcpText(warning: string, data: unknown) {
   return { content: [{ type: "text" as const, text: warning + JSON.stringify(data, null, 2) }] };
 }
+
+/**
+ * Drop null, undefined, empty-string and empty-array/object fields recursively
+ * so the client model spends context on values, not on absent ones. Numbers
+ * (including 0) and booleans are always kept.
+ */
+export function compactJson<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((item) => compactJson(item)).filter((item) => !isEmpty(item)) as T;
+  }
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      const compacted = compactJson(item);
+      if (!isEmpty(compacted)) out[key] = compacted;
+    }
+    return out as T;
+  }
+  return value;
+}
+
+function isEmpty(value: unknown): boolean {
+  if (value === null || value === undefined || value === "") return true;
+  if (Array.isArray(value)) return value.length === 0;
+  if (typeof value === "object") return Object.keys(value as object).length === 0;
+  return false;
+}

@@ -32,11 +32,32 @@ export class RateLimitError extends Error {
     this.name = "RateLimitError";
   }
 }
+/**
+ * Enable Banking error codes after which a session can never serve another
+ * account call. All of them end in re-authorization, so they share one error
+ * class; `code` keeps the upstream reason for logs and diagnostics.
+ */
+export const TERMINAL_SESSION_CODES = [
+  "EXPIRED_SESSION",
+  "SESSION_EXPIRED",
+  "REVOKED_SESSION",
+  "CLOSED_SESSION",
+  "SESSION_DOES_NOT_EXIST",
+  "WRONG_SESSION_STATUS",
+] as const;
+export type TerminalSessionCode = (typeof TERMINAL_SESSION_CODES)[number];
+
 export class ExpiredSessionError extends Error {
-  constructor(msg = "Bank session expired") {
+  readonly code: TerminalSessionCode;
+  constructor(code: TerminalSessionCode = "EXPIRED_SESSION", msg = "Bank session expired") {
     super(msg);
     this.name = "ExpiredSessionError";
+    this.code = code;
   }
+}
+
+export function terminalSessionCode(bodyText: string): TerminalSessionCode | null {
+  return TERMINAL_SESSION_CODES.find((code) => bodyText.includes(code)) ?? null;
 }
 
 export interface AuthStartResponse {
@@ -116,9 +137,8 @@ export class EbClient {
     if (res.status === 429 || bodyText.includes("ASPSP_RATE_LIMIT_EXCEEDED")) {
       throw new RateLimitError();
     }
-    if (bodyText.includes("EXPIRED_SESSION") || bodyText.includes("SESSION_EXPIRED")) {
-      throw new ExpiredSessionError();
-    }
+    const terminal = terminalSessionCode(bodyText);
+    if (terminal) throw new ExpiredSessionError(terminal);
     // Retry only idempotent reads: a POST (/auth, /sessions) that succeeded
     // server-side but answered 5xx must not be replayed with a spent code.
     if (options.retry !== false && res.status >= 500 && attempt < 3 && (init.method ?? "GET").toUpperCase() === "GET") {

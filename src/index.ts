@@ -1,5 +1,8 @@
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
+import { refreshAspspCache } from "./aspsps";
 import { handleAuthCallback, handleAuthSession, handleAuthStart } from "./auth";
+import { Db } from "./db";
+import { EbClient } from "./eb";
 import { BankingMCP } from "./mcp";
 import { migrate } from "./migrate";
 import { handleAuthorize } from "./oauth";
@@ -125,6 +128,9 @@ export default {
           enrichMaxPerSession: policy.enrichMaxPerSession,
         });
         console.log("cron sync:", JSON.stringify(summary));
+        // Directory call to Enable Banking, not to any bank: no refresh budget is spent.
+        const refreshed = await refreshAspspCache(new Db(resolved), () => new EbClient(resolved).getAspsps());
+        if (refreshed) console.log("cron: bank list cache refreshed");
       })()
     );
   },

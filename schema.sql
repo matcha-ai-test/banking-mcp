@@ -27,7 +27,12 @@ CREATE TABLE IF NOT EXISTS accounts (
   psu_type TEXT NOT NULL,
   product TEXT,
   last_synced_at TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  cash_account_type TEXT,
+  credit_limit_cents INTEGER,
+  usage TEXT,
+  bic TEXT,
+  card_last4 TEXT
 );
 
 CREATE TABLE IF NOT EXISTS transactions (
@@ -96,4 +101,13 @@ CREATE TABLE IF NOT EXISTS rate_limit (
   key TEXT PRIMARY KEY,
   count INTEGER NOT NULL,
   window_start TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS aspsp_cache (
+  name TEXT NOT NULL,
+  country TEXT NOT NULL,
+  psu_types TEXT,
+  maximum_consent_validity INTEGER,
+  fetched_at TEXT NOT NULL,
+  PRIMARY KEY (name, country)
 );
