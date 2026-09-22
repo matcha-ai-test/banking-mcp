@@ -1,9 +1,10 @@
+import { aspspRows } from "./aspsps";
 import { Db } from "./db";
 import { EbClient, type Aspsp } from "./eb";
 import { AUTH_LINK_CMD } from "./mcp-output";
 import { authGatePage, esc, pageResponse } from "./pages";
 import { backfillAccounts } from "./sync";
-import type { AccountRow, Env, PsuType } from "./types";
+import type { AccountRow, EbAccount, Env, PsuType } from "./types";
 import { AUTH_COOKIE_NAME, AUTH_COOKIE_TTL_MS, cookieFrom, maskIban, mintAuthCookie, rateLimitKey, secretsMatch, verifyAuthCookie } from "./util";
 
 const MAX_CONSENT_DAYS = 180;
@@ -40,6 +41,24 @@ export function enableBankingErrorPage(error: unknown): Response {
     `<h1>Enable Banking request failed${status ? ` (${status})` : ""}</h1><p>The call to Enable Banking did not succeed. Try the bank link again; if it continues, check the Application ID, the private key, and that the application is activated in the Enable Banking Control Panel.</p>`,
     502
   );
+}
+
+/**
+ * Metadata the session response already carries, so persisting it costs no
+ * bank call. A card number (CPAN) is reduced to its last four digits before
+ * it reaches D1; the full PAN is never stored.
+ */
+export function accountMetadata(a: EbAccount): Pick<AccountRow, "cash_account_type" | "credit_limit_cents" | "usage" | "bic" | "card_last4"> {
+  const cpan = (a.all_account_ids ?? []).find((id) => id?.scheme_name === "CPAN")?.identification;
+  const digits = typeof cpan === "string" ? cpan.replace(/\D/g, "") : "";
+  const limit = Number(a.credit_limit?.amount);
+  return {
+    cash_account_type: typeof a.cash_account_type === "string" ? a.cash_account_type : null,
+    credit_limit_cents: a.credit_limit?.amount != null && Number.isFinite(limit) ? Math.round(limit * 100) : null,
+    usage: typeof a.usage === "string" ? a.usage : null,
+    bic: typeof a.account_servicer?.bic_fi === "string" ? a.account_servicer.bic_fi : null,
+    card_last4: digits.length >= 4 ? digits.slice(-4) : null,
+  };
 }
 
 function operatorAuthorized(request: Request, env: Env): Promise<boolean> {
@@ -118,6 +137,8 @@ export async function handleAuthStart(request: Request, env: Env): Promise<Respo
   } catch (e) {
     return enableBankingErrorPage(e);
   }
+  // The list was fetched anyway; keep list_banks warm without a separate call.
+  try { await db.upsertAspsps(aspspRows(aspsps)); } catch { /* cache only */ }
   const matches = aspsps.filter(
     (a) => a.name.toLowerCase() === bankParam.toLowerCase() && (!country || a.country.toUpperCase() === country)
   );
@@ -215,6 +236,7 @@ export async function handleAuthCallback(request: Request, env: Env): Promise<Re
       psu_type: psuType,
       product: a.product ?? null,
       last_synced_at: null,
+      ...accountMetadata(a),
     }));
 
     // An authorized session that returns no accounts is not a success: the

@@ -376,12 +376,22 @@ export async function previewEnrichmentCandidates(
 
 /**
  * Full-history backfill, run synchronously right after authorization while the
- * ~1 hour full-history window is open. Tries progressively narrower windows.
+ * ~1 hour full-history window is open. First asks for the bank's deepest
+ * history (strategy=longest, Enable Banking's recommendation), then tries
+ * progressively narrower plain windows.
  */
+export const BACKFILL_LADDER: ReadonlyArray<{ days: number; strategy?: "longest" }> = [
+  { days: 365 * 5, strategy: "longest" },
+  { days: 365 * 5 },
+  { days: 365 * 2 },
+  { days: 365 },
+  { days: 92 },
+];
+
 export async function backfillAccounts(env: Env, accounts: AccountRow[]): Promise<AccountSyncResult[]> {
   const db = new Db(env);
   const eb = new EbClient(env);
-  const ladders = [365 * 5, 365 * 2, 365, 92];
+  const ladders = BACKFILL_LADDER;
   const results: AccountSyncResult[] = [];
   const budgets = new Map<string, EnrichmentBudget>();
   for (const account of accounts) {
@@ -393,9 +403,9 @@ export async function backfillAccounts(env: Env, accounts: AccountRow[]): Promis
       continue;
     }
     let done = false;
-    for (const days of ladders) {
+    for (const { days, strategy } of ladders) {
       try {
-        const r = await syncAccount(db, eb, account, { dateFrom: daysAgo(days), enrichmentBudget });
+        const r = await syncAccount(db, eb, account, { dateFrom: daysAgo(days), strategy, enrichmentBudget });
         results.push(r);
         done = true;
         break;

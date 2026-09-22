@@ -28,7 +28,12 @@ const STATEMENTS = [
     psu_type TEXT NOT NULL,
     product TEXT,
     last_synced_at TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    cash_account_type TEXT,
+    credit_limit_cents INTEGER,
+    usage TEXT,
+    bic TEXT,
+    card_last4 TEXT
   )`,
   `CREATE TABLE IF NOT EXISTS transactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,9 +97,22 @@ const STATEMENTS = [
     count INTEGER NOT NULL,
     window_start TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS aspsp_cache (
+    name TEXT NOT NULL,
+    country TEXT NOT NULL,
+    psu_types TEXT,
+    maximum_consent_validity INTEGER,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (name, country)
+  )`,
 ];
 
 const ADDITIVE_STATEMENTS = [
+  "ALTER TABLE accounts ADD COLUMN cash_account_type TEXT",
+  "ALTER TABLE accounts ADD COLUMN credit_limit_cents INTEGER",
+  "ALTER TABLE accounts ADD COLUMN usage TEXT",
+  "ALTER TABLE accounts ADD COLUMN bic TEXT",
+  "ALTER TABLE accounts ADD COLUMN card_last4 TEXT",
   "ALTER TABLE transactions ADD COLUMN detail_fetched_at TEXT",
   "ALTER TABLE transactions ADD COLUMN detail_claimed_at TEXT",
   "ALTER TABLE eb_sessions ADD COLUMN last_live_verified_at TEXT",

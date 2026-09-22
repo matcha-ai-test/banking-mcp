@@ -1,4 +1,4 @@
-import type { AccountRow, AuthStatusSessionRow, BalanceRow, EbTransaction, EbSessionRow, Env, PsuType, TxRow } from "./types";
+import type { AccountRow, AspspRow, AuthStatusSessionRow, BalanceRow, EbTransaction, EbSessionRow, Env, PsuType, TxRow } from "./types";
 
 /**
  * D1 repository. The database is bound directly to the Worker — it has no
@@ -177,13 +177,17 @@ export class Db {
   async upsertAccounts(rows: AccountRow[]): Promise<void> {
     if (rows.length === 0) return;
     const stmt = this.d1.prepare(
-      `INSERT INTO accounts (account_uid, session_pk, name, iban, currency, psu_type, product)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO accounts (account_uid, session_pk, name, iban, currency, psu_type, product,
+         cash_account_type, credit_limit_cents, usage, bic, card_last4)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(account_uid) DO UPDATE SET
          session_pk = excluded.session_pk, name = excluded.name, iban = excluded.iban,
-         currency = excluded.currency, psu_type = excluded.psu_type, product = excluded.product`
+         currency = excluded.currency, psu_type = excluded.psu_type, product = excluded.product,
+         cash_account_type = excluded.cash_account_type, credit_limit_cents = excluded.credit_limit_cents,
+         usage = excluded.usage, bic = excluded.bic, card_last4 = excluded.card_last4`
     );
-    await this.d1.batch(rows.map((a) => stmt.bind(a.account_uid, a.session_pk, a.name, a.iban, a.currency, a.psu_type, a.product)));
+    await this.d1.batch(rows.map((a) => stmt.bind(a.account_uid, a.session_pk, a.name, a.iban, a.currency, a.psu_type, a.product,
+      a.cash_account_type ?? null, a.credit_limit_cents ?? null, a.usage ?? null, a.bic ?? null, a.card_last4 ?? null)));
   }
 
   /**
@@ -391,6 +395,61 @@ export class Db {
     return r.results;
   }
 
+  /**
+   * Server-side aggregation over cached booked transactions so the client model
+   * never has to add up hundreds of rows itself. Grouped per currency always,
+   * plus one optional dimension. Amounts stay in cents; the caller formats.
+   */
+  async summarizeTransactions(opts: {
+    accountUids?: string[] | null;
+    dateFrom?: string;
+    dateTo?: string;
+    groupBy: "month" | "counterparty" | "account" | "currency";
+    limit: number;
+  }): Promise<Array<{ key: string; currency: string; out_cents: number; in_cents: number; count: number }>> {
+    if (opts.accountUids?.length === 0) return [];
+    const keyExpr = {
+      month: "substr(booking_date, 1, 7)",
+      counterparty: "COALESCE(NULLIF(TRIM(counterparty), ''), NULLIF(TRIM(remittance_info), ''), '(unknown)')",
+      account: "account_uid",
+      currency: "currency",
+    }[opts.groupBy];
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (opts.accountUids) {
+      where.push(`account_uid IN (${opts.accountUids.map(() => "?").join(",")})`);
+      params.push(...opts.accountUids);
+    }
+    if (opts.dateFrom) { where.push("booking_date >= ?"); params.push(opts.dateFrom); }
+    if (opts.dateTo) { where.push("booking_date <= ?"); params.push(opts.dateTo); }
+    params.push(opts.limit);
+    const sql = `SELECT ${keyExpr} AS key, currency,
+        COALESCE(SUM(CASE WHEN credit_debit = 'DBIT' THEN ABS(amount_cents) ELSE 0 END), 0) AS out_cents,
+        COALESCE(SUM(CASE WHEN credit_debit <> 'DBIT' THEN ABS(amount_cents) ELSE 0 END), 0) AS in_cents,
+        COUNT(*) AS count
+      FROM transactions ${where.length ? "WHERE " + where.join(" AND ") : ""}
+      GROUP BY key, currency
+      ORDER BY ${opts.groupBy === "month" ? "key DESC" : "out_cents DESC, in_cents DESC"}, currency
+      LIMIT ?`;
+    return (await this.d1.prepare(sql).bind(...params).all<{ key: string; currency: string; out_cents: number; in_cents: number; count: number }>()).results;
+  }
+
+  /** Total booked credits per currency in a window; the basis for the work-time estimate. */
+  async inflowTotals(opts: { accountUids?: string[] | null; dateFrom: string; dateTo: string }):
+    Promise<Array<{ currency: string; in_cents: number; count: number }>> {
+    if (opts.accountUids?.length === 0) return [];
+    const where = ["credit_debit <> 'DBIT'", "booking_date >= ?", "booking_date <= ?"];
+    const params: unknown[] = [opts.dateFrom, opts.dateTo];
+    if (opts.accountUids) {
+      where.push(`account_uid IN (${opts.accountUids.map(() => "?").join(",")})`);
+      params.push(...opts.accountUids);
+    }
+    return (await this.d1.prepare(
+      `SELECT currency, COALESCE(SUM(ABS(amount_cents)), 0) AS in_cents, COUNT(*) AS count
+       FROM transactions WHERE ${where.join(" AND ")} GROUP BY currency ORDER BY in_cents DESC`
+    ).bind(...params).all<{ currency: string; in_cents: number; count: number }>()).results;
+  }
+
   async replacePending(accountUid: string, rows: Omit<TxRow, "dedup_key">[]): Promise<void> {
     const stmts: D1PreparedStatement[] = [
       this.d1.prepare("DELETE FROM pending_transactions WHERE account_uid = ?").bind(accountUid),
@@ -434,6 +493,40 @@ export class Db {
     }
     const r = await this.d1.prepare(sql).bind(...params).all<BalanceRow & { name: string | null; iban: string | null }>();
     return r.results;
+  }
+
+  // ---- ASPSP (bank list) cache ----
+
+  /** Upsert bank rows; a partial (per-country) fetch never removes other countries. */
+  async upsertAspsps(rows: AspspRow[]): Promise<void> {
+    if (rows.length === 0) return;
+    const stmt = this.d1.prepare(
+      `INSERT INTO aspsp_cache (name, country, psu_types, maximum_consent_validity, fetched_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(name, country) DO UPDATE SET
+         psu_types = excluded.psu_types, maximum_consent_validity = excluded.maximum_consent_validity,
+         fetched_at = excluded.fetched_at`
+    );
+    for (let i = 0; i < rows.length; i += 50) {
+      await this.d1.batch(rows.slice(i, i + 50).map((r) =>
+        stmt.bind(r.name, r.country, r.psu_types, r.maximum_consent_validity, r.fetched_at)));
+    }
+  }
+
+  async aspspCacheFetchedAt(): Promise<string | null> {
+    const row = await this.d1.prepare("SELECT MAX(fetched_at) AS fetched_at FROM aspsp_cache").first<{ fetched_at: string | null }>();
+    return row?.fetched_at ?? null;
+  }
+
+  async queryAspsps(opts: { country?: string; search?: string; limit: number }): Promise<AspspRow[]> {
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (opts.country) { where.push("country = ?"); params.push(opts.country.toUpperCase()); }
+    if (opts.search) { where.push("name LIKE ?"); params.push(`%${opts.search}%`); }
+    params.push(opts.limit);
+    return (await this.d1.prepare(
+      `SELECT * FROM aspsp_cache ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY country, name LIMIT ?`
+    ).bind(...params).all<AspspRow>()).results;
   }
 
   // ---- auth state ----

@@ -11,6 +11,7 @@ import {
   AUTH_LINK_CMD,
   buildAuthStatus,
   buildSessionWarnings,
+  compactJson,
   REFRESH_BUDGET_PER_DAY,
   serializeMcpText,
 } from "./mcp-output";
@@ -21,11 +22,11 @@ import { maskIban, matchAccountUids } from "./util";
 /** Guides clients through cached reads, budgeted refreshes, and operator-controlled renewal. */
 const SERVER_INSTRUCTIONS = `banking-mcp is a read-only mirror of the operator's bank accounts (Enable Banking, PSD2). Tools read a local cache filled by a nightly sync unless a live call is explicitly requested. Nothing here moves money or writes to a bank.
 
-Normal order: list_accounts to resolve accounts, then get_balances or get_transactions, then export_statements for bulk history. Account uids change after every re-authorization: always match on account name or IBAN, never on a hardcoded uid.
+Normal order: list_accounts to resolve accounts, then get_balances or get_transactions, then export_statements for bulk history. Account uids change after every re-authorization: always match on account name or IBAN, never on a hardcoded uid. For totals and breakdowns use spending_summary, which sums in the database, rather than adding up transaction rows yourself. list_banks answers which banks Enable Banking supports from a local cache.
 
 Rows whose bank text is only the account holder's own name are automatically enriched from the bank's detail record during sync (capped per night); get_transaction_details returns the cached detail for free and only calls the bank when no detail is cached yet (one bank fetch from the daily budget). Enrichment's backfill window and per-account/per-session caps are configurable, both per refresh_now call and, for the nightly sync, via optional Worker vars — the built-in figures (45 days, 3 per account, 6 per bank session) are conservative starting recommendations, not fixed defaults or documented bank limits. Preview a run with refresh_now's enrichment_dry_run before spending live budget.
 
-refresh_now fetches transactions and balances from the bank. It is budgeted: 3 per bank per UTC day, because banks allow roughly 4 unattended fetches a day and the nightly sync reserves one. A failed attempt can still consume budget. Never call refresh_now to test connectivity.
+refresh_now fetches transactions and balances from the bank. It is budgeted: 3 per bank session per UTC day, because banks allow roughly 4 unattended fetches a day and the nightly sync reserves one. A failed attempt can still consume budget. Never call refresh_now to test connectivity.
 
 get_auth_status returns cached session metadata plus the last verified live call by default. Set verify=true to check stored sessions via Enable Banking, with a 15-minute server-side cooldown; live_cached=true means the stored verification result was reused. Verification does not refresh account data; its upstream budget cost is undocumented. Cached status can read active while the bank session has in fact expired; last_live_* is the authority. Use get_auth_status, not refresh_now, to check whether the connection is healthy.
 
@@ -85,12 +86,18 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
           iban: maskIban(a.iban),
           currency: a.currency,
           psu_type: a.psu_type,
+          // Session-response metadata; compactJson drops the fields a bank did not supply.
+          account_type: a.cash_account_type ?? null,
+          usage: a.usage ?? null,
+          bic: a.bic ?? null,
+          card_last4: a.card_last4 ?? null,
+          credit_limit: a.credit_limit_cents != null ? money(a.credit_limit_cents) : null,
           balances: balances
             .filter((b) => b.account_uid === a.account_uid)
             .map((b) => ({ type: b.balance_type, amount: money(b.amount_cents), currency: b.currency, as_of: b.fetched_at })),
           last_synced_at: a.last_synced_at,
         }));
-        return this.text(warning, out);
+        return this.text(warning, compactJson(out));
       }
     );
 
@@ -133,9 +140,10 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
           search: z.string().optional().describe("Free-text match on counterparty/description"),
           limit: z.number().int().min(1).max(500).default(100),
           include_pending: z.boolean().default(true),
+          compact: z.boolean().optional().describe("Drop null and empty fields from each row to save context. Omit for the full row shape."),
         },
       },
-      async ({ account, date_from, date_to, search, limit, include_pending }) => {
+      async ({ account, date_from, date_to, search, limit, include_pending, compact }) => {
         const db = this.db();
         const uids = await this.resolveAccountUids(db, account);
         if (uids !== null && uids.length === 0) return this.text("", { error: `No account matches "${account}"` });
@@ -161,11 +169,139 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
           pending = p.map((r) => mapRow(r, "PENDING"));
         }
         const warning = await this.warnings(db);
-        return this.text(warning, {
+        const payload = {
           booked: booked.map((r) => mapRow(r)),
           ...(include_pending ? { pending } : {}),
           note: "Amounts are signed: negative = money out, positive = money in. Cached data: see last_synced_at via list_accounts.",
-        });
+        };
+        return this.text(warning, compact ? compactJson(payload) : payload);
+      }
+    );
+
+    this.server.registerTool(
+      "spending_summary",
+      {
+        description:
+          "Sum cached booked transactions server-side, grouped per currency and by month, counterparty, or account. Use for totals and breakdowns instead of adding up get_transactions rows; the arithmetic is done in the database. Amounts are absolute: out = money out, in = money in, net = in - out. No bank call or refresh-budget cost.",
+        inputSchema: {
+          account: z.string().optional().describe("Account name, IBAN, uid or bank name. Omit for all accounts."),
+          date_from: z.string().optional().describe("YYYY-MM-DD (inclusive)"),
+          date_to: z.string().optional().describe("YYYY-MM-DD (inclusive)"),
+          group_by: z.enum(["month", "counterparty", "account", "currency"]).default("month"),
+          limit: z.number().int().min(1).max(200).default(24).describe("Max groups returned; counterparty and account groups are ordered by money out."),
+        },
+      },
+      async ({ account, date_from, date_to, group_by, limit }) => {
+        const db = this.db();
+        const uids = await this.resolveAccountUids(db, account);
+        if (uids !== null && uids.length === 0) return this.text("", { error: `No account matches "${account}"` });
+        const accounts = await db.allAccounts();
+        const nameOf = (uid: string) => accounts.find((a) => a.account_uid === uid)?.name ?? uid.slice(0, 8);
+        const rows = await db.summarizeTransactions({ accountUids: uids, dateFrom: date_from, dateTo: date_to, groupBy: group_by, limit });
+        const totals = new Map<string, { currency: string; out: number; in: number; count: number }>();
+        for (const r of rows) {
+          const t = totals.get(r.currency) ?? { currency: r.currency, out: 0, in: 0, count: 0 };
+          t.out += r.out_cents; t.in += r.in_cents; t.count += r.count;
+          totals.set(r.currency, t);
+        }
+        const warning = await this.warnings(db);
+        return this.text(warning, compactJson({
+          group_by,
+          date_from: date_from ?? null,
+          date_to: date_to ?? null,
+          totals: [...totals.values()].sort((a, b) => b.out - a.out || b.in - a.in)
+            .map((t) => ({ currency: t.currency, out: money(t.out), in: money(t.in), net: money(t.in - t.out), count: t.count })),
+          groups: rows.map((r) => ({
+            [group_by]: group_by === "account" ? nameOf(r.key) : r.key,
+            currency: r.currency,
+            out: money(r.out_cents),
+            in: money(r.in_cents),
+            net: money(r.in_cents - r.out_cents),
+            count: r.count,
+          })),
+          note: rows.length >= limit
+            ? `Only the first ${limit} groups are shown; totals cover those groups only. Raise limit or narrow the date range for a complete sum.`
+            : "Booked transactions only; pending rows are excluded. Totals are computed in the database.",
+        }));
+      }
+    );
+
+    this.server.registerTool(
+      "amount_as_work_time",
+      {
+        description:
+          "Express an amount as hours of work, using either an explicit monthly net income or an estimate from cached booked inflows (average of the last months). A reflection aid, not advice. No bank call or refresh-budget cost.",
+        inputSchema: {
+          amount: z.number().positive().describe("Amount to translate, in the income currency"),
+          currency: z.string().length(3).optional().describe("ISO code; defaults to the account's currency when estimating"),
+          monthly_net_income: z.number().positive().optional().describe("Explicit monthly net income. Omit to estimate from cached inflows."),
+          hours_per_month: z.number().positive().max(744).default(160),
+          account: z.string().optional().describe("Account name, IBAN, uid or bank name to base the inflow estimate on. Omit for all accounts."),
+          months: z.number().int().min(1).max(24).default(3).describe("Lookback for the inflow estimate"),
+        },
+      },
+      async ({ amount, currency, monthly_net_income, hours_per_month, account, months }) => {
+        const db = this.db();
+        const uids = await this.resolveAccountUids(db, account);
+        if (uids !== null && uids.length === 0) return this.text("", { error: `No account matches "${account}"` });
+        let monthly = monthly_net_income ?? null;
+        let basis = "explicit monthly_net_income";
+        let cur = currency?.toUpperCase() ?? null;
+        if (monthly === null) {
+          const to = new Date();
+          const from = new Date(to);
+          from.setUTCMonth(from.getUTCMonth() - months);
+          const inflows = await db.inflowTotals({ accountUids: uids, dateFrom: from.toISOString().slice(0, 10), dateTo: to.toISOString().slice(0, 10) });
+          const pick = cur ? inflows.find((i) => i.currency === cur) : inflows[0];
+          if (!pick || pick.in_cents <= 0) {
+            return this.text("", { error: "No cached inflows to estimate income from. Pass monthly_net_income explicitly." });
+          }
+          cur = pick.currency;
+          monthly = money(pick.in_cents) / months;
+          basis = `average of all booked inflows over the last ${months} month(s) (${pick.count} credits), which may include transfers, refunds and other non-salary income`;
+        }
+        const hourly = monthly / hours_per_month;
+        const hours = amount / hourly;
+        return this.text(await this.warnings(db), compactJson({
+          amount,
+          currency: cur,
+          hours: Number(hours.toFixed(1)),
+          work_days: Number((hours / (hours_per_month / 20)).toFixed(1)),
+          monthly_net_income: Number(monthly.toFixed(2)),
+          hourly_net_income: Number(hourly.toFixed(2)),
+          hours_per_month,
+          basis,
+          note: "A reflection aid computed from cached data, not financial advice.",
+        }));
+      }
+    );
+
+    this.server.registerTool(
+      "list_banks",
+      {
+        description:
+          "List banks (ASPSPs) Enable Banking supports, from a local cache refreshed weekly by the nightly sync and on every bank link. Use to find the exact ASPSP name and country for auth:link. Cache-only: no bank call or refresh-budget cost.",
+        inputSchema: {
+          country: z.string().length(2).optional().describe("ISO 3166-1 alpha-2 country code, e.g. SE"),
+          search: z.string().max(80).optional().describe("Case-insensitive substring of the bank name"),
+          limit: z.number().int().min(1).max(500).default(100),
+        },
+      },
+      async ({ country, search, limit }) => {
+        const db = this.db();
+        const [rows, fetchedAt] = await Promise.all([db.queryAspsps({ country, search, limit }), db.aspspCacheFetchedAt()]);
+        return this.text(await this.warnings(db), compactJson({
+          cached_at: fetchedAt,
+          banks: rows.map((r) => ({
+            name: r.name,
+            country: r.country,
+            psu_types: r.psu_types ? r.psu_types.split(",") : null,
+            max_consent_days: r.maximum_consent_validity != null ? Math.floor(r.maximum_consent_validity / 86400) : null,
+          })),
+          note: fetchedAt
+            ? rows.length >= limit ? `Only the first ${limit} banks are shown; narrow with country or search.` : null
+            : `The bank list is not cached yet. It fills on the next nightly sync or the next '${AUTH_LINK_CMD}' run.`,
+        }));
       }
     );
 
@@ -216,7 +352,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       "refresh_now",
       {
         description:
-          "Fetch fresh bank data via Enable Banking and update the local cache; this fetches transactions and balances. Use only when fresh data is needed, never as a connectivity test. Budget: 3 per bank per UTC day; a failed attempt can still count. Supports an optional account filter. Enrichment of own-name transfers during this refresh is configurable via enrichment_backfill_days and enrichment_max (see their descriptions for recommended values, not selected defaults); enrichment_dry_run previews candidate counts for free.",
+          "Fetch fresh bank data via Enable Banking and update the local cache; this fetches transactions and balances. Use only when fresh data is needed, never as a connectivity test. Budget: 3 per bank session per UTC day; a failed attempt can still count. Supports an optional account filter. Enrichment of own-name transfers during this refresh is configurable via enrichment_backfill_days and enrichment_max (see their descriptions for recommended values, not selected defaults); enrichment_dry_run previews candidate counts for free.",
         inputSchema: {
           account: z.string().optional().describe("Account name, IBAN, uid or bank name. Omit for all accounts."),
           strategy: z.enum(["default", "longest"]).optional().describe('"longest" asks the bank for the deepest available history (use once after a re-authorization for backfill); omit for normal refreshes.'),
