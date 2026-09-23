@@ -50,6 +50,27 @@ export interface AccountRow {
   bic?: string | null;
   /** Last four digits of a card number (CPAN) when the account is a card; never the full PAN. */
   card_last4?: string | null;
+  /** Stable-identity registry linkage (Step 0); optional so older rows and fixtures stay valid. */
+  identification_hash?: string | null;
+  account_identity_id?: string | null;
+}
+
+export interface AccountIdentityRow {
+  id: string;
+  iban: string | null;
+  identification_hash: string | null;
+  currency: string;
+  psu_type: PsuType;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AccountLabelRow {
+  account_identity_id: string;
+  label: string;
+  revision: number;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface AspspRow {
@@ -117,5 +138,7 @@ export interface EbAccount {
   cash_account_type?: string | null;
   credit_limit?: { currency?: string | null; amount?: string | null } | null;
   usage?: string | null;
+  identification_hash?: string | null;
+  identification_hashes?: string[] | null;
   [k: string]: unknown;
 }

@@ -220,6 +220,7 @@ Not documented yet. The CLI configuration above does not by itself configure a c
 | Tool | Purpose |
 |---|---|
 | `list_accounts` | Cached accounts, masked IBANs, latest cached balances, and last sync time |
+| `set_account_label` | Attach or clear a personal label on one linked account, keyed on its stable `account_ref`. Stored locally, survives re-authorization, never writes to the bank |
 | `get_balances` | Cached balances, optionally filtered by account name, last four IBAN digits, or bank |
 | `get_transactions` | Up to 500 cached transactions, pending included by default, with account, date, and text filters |
 | `get_transaction_details` | Details for a matching transaction. Uses cached details when available; otherwise makes a budgeted bank request and caches the result |
@@ -231,6 +232,8 @@ Not documented yet. The CLI configuration above does not by itself configure a c
 | `list_banks` | Banks Enable Banking supports, with country and personal/business support, from a local cache refreshed weekly by the nightly sync and on every `auth:link`. Finds the exact ASPSP name for `auth:link` |
 
 `list_accounts` also shows account metadata the bank supplied at link time (account type, usage, BIC, credit limit, and the last four digits of a card number); fields a bank did not supply are omitted. `get_transactions` accepts `compact: true` to drop null and empty fields from each row.
+
+`list_accounts` returns a stable `account_ref` (survives re-authorization; absent when the bank supplied neither an IBAN nor an identification hash) and an optional `label`, and every tool's `account` filter also accepts a label or an `account_ref`. An exact label or `account_ref` selects only that account. Labels are 3 to 60 characters and are rejected when they look like an account number or would collide with another account's name, bank, label, identifier, or last four digits. History is folded across re-authorizations only for rows with the same IBAN (or, for IBAN-less accounts such as cards, the same identification hash); anything ambiguous is left unfolded rather than merged.
 
 Bank availability comes from Enable Banking: live during `auth:link`, and from the local `list_banks` cache in clients. Its documentation covers country-specific Open Banking support across [EU/EEA markets](https://enablebanking.com/docs/markets); available countries, banks, and Personal/Business support can change.
 

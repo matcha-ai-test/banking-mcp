@@ -1,4 +1,6 @@
-import type { AccountRow, AspspRow, AuthStatusSessionRow, BalanceRow, EbTransaction, EbSessionRow, Env, PsuType, TxRow } from "./types";
+import type { AccountIdentityRow, AccountRow, AspspRow, AuthStatusSessionRow, BalanceRow, EbTransaction, EbSessionRow, Env, PsuType, TxRow } from "./types";
+import { normalizeText } from "./util";
+import { canonicalIban } from "./identity";
 
 /**
  * D1 repository. The database is bound directly to the Worker — it has no
@@ -158,12 +160,16 @@ export class Db {
     return r.results;
   }
 
-  async allAccountsWithBank(): Promise<Array<AccountRow & { aspsp_name: string | null }>> {
+  async allAccountsWithBank(): Promise<Array<AccountRow & { aspsp_name: string | null; label: string | null; label_revision: number | null }>> {
     const r = await this.d1
       .prepare(
-        "SELECT a.*, s.aspsp_name FROM accounts a LEFT JOIN eb_sessions s ON s.id = a.session_pk ORDER BY s.aspsp_name, a.name"
+        `SELECT a.*, s.aspsp_name, l.label, l.revision AS label_revision
+           FROM accounts a
+           LEFT JOIN eb_sessions s ON s.id = a.session_pk
+           LEFT JOIN account_labels l ON l.account_identity_id = a.account_identity_id
+          ORDER BY s.aspsp_name, a.name`
       )
-      .all<AccountRow & { aspsp_name: string | null }>();
+      .all<AccountRow & { aspsp_name: string | null; label: string | null; label_revision: number | null }>();
     return r.results;
   }
 
@@ -176,42 +182,99 @@ export class Db {
 
   async upsertAccounts(rows: AccountRow[]): Promise<void> {
     if (rows.length === 0) return;
+    // account_identity_id is deliberately excluded from DO UPDATE SET: the
+    // registry pointer, once assigned, must survive a re-auth of the same uid.
     const stmt = this.d1.prepare(
       `INSERT INTO accounts (account_uid, session_pk, name, iban, currency, psu_type, product,
-         cash_account_type, credit_limit_cents, usage, bic, card_last4)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         cash_account_type, credit_limit_cents, usage, bic, card_last4, identification_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(account_uid) DO UPDATE SET
          session_pk = excluded.session_pk, name = excluded.name, iban = excluded.iban,
          currency = excluded.currency, psu_type = excluded.psu_type, product = excluded.product,
          cash_account_type = excluded.cash_account_type, credit_limit_cents = excluded.credit_limit_cents,
-         usage = excluded.usage, bic = excluded.bic, card_last4 = excluded.card_last4`
+         usage = excluded.usage, bic = excluded.bic, card_last4 = excluded.card_last4,
+         identification_hash = COALESCE(excluded.identification_hash, accounts.identification_hash)`
     );
     await this.d1.batch(rows.map((a) => stmt.bind(a.account_uid, a.session_pk, a.name, a.iban, a.currency, a.psu_type, a.product,
-      a.cash_account_type ?? null, a.credit_limit_cents ?? null, a.usage ?? null, a.bic ?? null, a.card_last4 ?? null)));
+      a.cash_account_type ?? null, a.credit_limit_cents ?? null, a.usage ?? null, a.bic ?? null, a.card_last4 ?? null,
+      a.identification_hash ?? null)));
   }
 
   /**
-   * Prior-generation account rows that share this identity (same IBAN + currency + psu_type)
-   * but sit under a different account_uid — the residue of earlier re-authorizations, since
-   * Enable Banking mints a fresh uid on each auth. Oldest first, so the earliest-created row
-   * survives on collapse. IBAN is the stable identity key; skip when it is absent.
+   * Prior-generation account rows that are safe to fold into keepUid — the residue of earlier
+   * re-authorizations, since Enable Banking mints a fresh uid on each auth. The candidate set is
+   * the union of (a) rows sharing keepUid's registry identity and (b) legacy rows with no
+   * identity pointer that match the new row's IBAN/currency/psu_type exactly (only considered
+   * when the new row has an IBAN). A candidate is dropped, even from (a), when its own IBAN is
+   * non-null and canonically differs from the new row's IBAN, when its psu_type differs, or when
+   * it is itself part of the current auth batch (batchUids) — folding two fresh rows from the
+   * same session into each other would be wrong even if they briefly shared an identity. Oldest
+   * first, so the earliest-created row survives on collapse.
+   *
+   * IBAN is authoritative for folding: two rows sharing the same canonical IBAN (+ psu_type,
+   * currency IS) are the same account regardless of identification_hash, so the legacy arm never
+   * compares hashes — a differing hash on an IBAN match just means the bank sent a different hash
+   * for the same account across generations, not a different account.
    */
   async staleAccountGenerations(
     iban: string | null,
     currency: string | null,
     psuType: PsuType,
-    keepUid: string
+    keepUid: string,
+    identityId?: string | null,
+    batchUids?: Iterable<string>
   ): Promise<string[]> {
-    if (!iban) return [];
-    const r = await this.d1
-      .prepare(
-        `SELECT account_uid FROM accounts
-         WHERE iban = ? AND currency IS ? AND psu_type = ? AND account_uid != ?
-         ORDER BY created_at ASC`
-      )
-      .bind(iban, currency, psuType, keepUid)
-      .all<{ account_uid: string }>();
-    return r.results.map((x) => x.account_uid);
+    type Candidate = {
+      account_uid: string;
+      iban: string | null;
+      psu_type: PsuType;
+      created_at: string;
+    };
+    const candidates = new Map<string, Candidate>();
+
+    if (identityId) {
+      const r = await this.d1
+        .prepare(
+          `SELECT account_uid, iban, psu_type, created_at FROM accounts
+           WHERE account_identity_id = ? AND account_uid != ? ORDER BY created_at ASC`
+        )
+        .bind(identityId, keepUid)
+        .all<Candidate>();
+      for (const row of r.results) candidates.set(row.account_uid, row);
+    }
+    if (iban) {
+      const r = await this.d1
+        .prepare(
+          `SELECT account_uid, iban, psu_type, created_at FROM accounts
+           WHERE account_identity_id IS NULL AND iban = ? AND currency IS ? AND psu_type = ? AND account_uid != ?
+           ORDER BY created_at ASC`
+        )
+        .bind(iban, currency, psuType, keepUid)
+        .all<Candidate>();
+      for (const row of r.results) candidates.set(row.account_uid, row);
+    }
+
+    const newIban = canonicalIban(iban);
+    const exclude = new Set(batchUids ?? []);
+    exclude.add(keepUid);
+
+    return [...candidates.values()]
+      .filter((c) => {
+        if (exclude.has(c.account_uid)) return false;
+        if (c.psu_type !== psuType) return false;
+        // Only rows that both carry the same canonical IBAN, or both carry
+        // none, may be folded — symmetric fail-closed. A candidate with a
+        // real IBAN must never be silently merged into an IBAN-less row, and
+        // an IBAN-less candidate must never be merged into an IBAN-bearing
+        // row either.
+        // Gate on the raw column first so an uncanonicalizable IBAN still counts as "has IBAN".
+        if ((iban == null) !== (c.iban == null)) return false;
+        if (iban == null) return true;
+        const candIban = canonicalIban(c.iban);
+        return newIban !== null && candIban !== null ? candIban === newIban : c.iban === iban;
+      })
+      .sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0))
+      .map((c) => c.account_uid);
   }
 
   /**
@@ -588,5 +651,231 @@ export class Db {
       .bind(key, `-${windowSeconds} seconds`, `-${windowSeconds} seconds`, `-${windowSeconds} seconds`, max)
       .first<{ count: number }>();
     return row !== null;
+  }
+
+  // ---- account identities (Step 0) ----
+
+  async identityByIban(iban: string, currency: string, psuType: PsuType): Promise<AccountIdentityRow | null> {
+    return this.d1.prepare("SELECT * FROM account_identities WHERE iban = ? AND currency = ? AND psu_type = ?")
+      .bind(iban, currency, psuType).first<AccountIdentityRow>();
+  }
+
+  async identityByHash(hash: string, currency: string, psuType: PsuType): Promise<AccountIdentityRow | null> {
+    return this.d1.prepare("SELECT * FROM account_identities WHERE identification_hash = ? AND currency = ? AND psu_type = ?")
+      .bind(hash, currency, psuType).first<AccountIdentityRow>();
+  }
+
+  async identityById(id: string): Promise<AccountIdentityRow | null> {
+    return this.d1.prepare("SELECT * FROM account_identities WHERE id = ?").bind(id).first<AccountIdentityRow>();
+  }
+
+  /**
+   * A plain INSERT, not INSERT OR IGNORE: a UNIQUE collision (a concurrent
+   * creator won the identity) is the only outcome that means "someone else
+   * already has this row" and maps to false. Any other error (e.g. a CHECK
+   * violation) is a real, unexpected failure and must propagate, so
+   * assignAccountIdentities classifies it as transient_error and the backfill
+   * latch stays not-done rather than silently treating it as a lost race.
+   */
+  async insertIdentityIgnore(row: { id: string; iban: string | null; identification_hash: string | null; currency: string; psu_type: PsuType }): Promise<boolean> {
+    try {
+      const result = await this.d1.prepare(
+        "INSERT INTO account_identities (id, iban, identification_hash, currency, psu_type) VALUES (?, ?, ?, ?, ?)"
+      ).bind(row.id, row.iban, row.identification_hash, row.currency, row.psu_type).run();
+      return result.meta.changes > 0;
+    } catch (error) {
+      if (/UNIQUE constraint failed/i.test(error instanceof Error ? error.message : String(error))) return false;
+      throw error;
+    }
+  }
+
+  async attachIdentityIban(id: string, iban: string): Promise<boolean> {
+    try {
+      const result = await this.d1.prepare(
+        "UPDATE account_identities SET iban = ?, updated_at = datetime('now') WHERE id = ? AND iban IS NULL"
+      ).bind(iban, id).run();
+      return result.meta.changes > 0;
+    } catch (error) {
+      if (/UNIQUE constraint failed/i.test(error instanceof Error ? error.message : String(error))) return false;
+      throw error;
+    }
+  }
+
+  async attachIdentityHash(id: string, hash: string): Promise<boolean> {
+    try {
+      const result = await this.d1.prepare(
+        "UPDATE account_identities SET identification_hash = ?, updated_at = datetime('now') WHERE id = ? AND identification_hash IS NULL"
+      ).bind(hash, id).run();
+      return result.meta.changes > 0;
+    } catch (error) {
+      if (/UNIQUE constraint failed/i.test(error instanceof Error ? error.message : String(error))) return false;
+      throw error;
+    }
+  }
+
+  async setAccountIdentityIfNull(uid: string, identityId: string): Promise<void> {
+    await this.d1.prepare("UPDATE accounts SET account_identity_id = ? WHERE account_uid = ? AND account_identity_id IS NULL")
+      .bind(identityId, uid).run();
+  }
+
+  /** A pointer that already exists and disagrees with identityId is left untouched; returns false. */
+  async verifyAccountIdentity(uid: string, identityId: string): Promise<boolean> {
+    const current = await this.accountIdentityOf(uid);
+    return current === identityId;
+  }
+
+  async accountIdentityOf(uid: string): Promise<string | null> {
+    const row = await this.d1.prepare("SELECT account_identity_id FROM accounts WHERE account_uid = ?")
+      .bind(uid).first<{ account_identity_id: string | null }>();
+    return row?.account_identity_id ?? null;
+  }
+
+  async accountsWithoutIdentity(): Promise<AccountRow[]> {
+    const r = await this.d1.prepare(
+      "SELECT * FROM accounts WHERE account_identity_id IS NULL AND (iban IS NOT NULL OR identification_hash IS NOT NULL) ORDER BY created_at ASC"
+    ).all<AccountRow>();
+    return r.results;
+  }
+
+  async accountUidsForIdentity(identityId: string): Promise<string[]> {
+    const r = await this.d1.prepare("SELECT account_uid FROM accounts WHERE account_identity_id = ? ORDER BY created_at ASC")
+      .bind(identityId).all<{ account_uid: string }>();
+    return r.results.map((x) => x.account_uid);
+  }
+
+  async accountIdentitiesForUids(uids: string[]): Promise<Map<string, string | null>> {
+    const out = new Map<string, string | null>();
+    for (let i = 0; i < uids.length; i += 90) {
+      const chunk = uids.slice(i, i + 90);
+      const r = await this.d1.prepare(
+        `SELECT account_uid, account_identity_id FROM accounts WHERE account_uid IN (${chunk.map(() => "?").join(",")})`
+      ).bind(...chunk).all<{ account_uid: string; account_identity_id: string | null }>();
+      for (const row of r.results) out.set(row.account_uid, row.account_identity_id);
+    }
+    return out;
+  }
+
+  // ---- account labels (Step 1) ----
+
+  /** A tombstoned row (label IS NULL after a clear) is not a label: excluded here so every
+   * caller of labelsByIdentity treats a cleared identity exactly like one that never had a row. */
+  async labelsByIdentity(ids: string[]): Promise<Map<string, { label: string; revision: number }>> {
+    const out = new Map<string, { label: string; revision: number }>();
+    for (let i = 0; i < ids.length; i += 90) {
+      const chunk = ids.slice(i, i + 90);
+      if (chunk.length === 0) continue;
+      const r = await this.d1.prepare(
+        `SELECT account_identity_id, label, revision FROM account_labels
+         WHERE account_identity_id IN (${chunk.map(() => "?").join(",")}) AND label IS NOT NULL`
+      ).bind(...chunk).all<{ account_identity_id: string; label: string; revision: number }>();
+      for (const row of r.results) out.set(row.account_identity_id, { label: row.label, revision: row.revision });
+    }
+    return out;
+  }
+
+  /**
+   * label_norm carries the DB-level uniqueness guarantee (idx_account_labels_norm):
+   * a concurrent writer racing on the same normalized label collides here even
+   * when the collision-scan read in the caller missed it. A UNIQUE failure on
+   * that index maps to "label_collision"; any other error propagates.
+   */
+  async upsertLabel(identityId: string, label: string, expectedRevision: number | null): Promise<{ ok: true; revision: number } | { ok: false; reason: "revision_conflict" | "label_collision" }> {
+    const labelNorm = normalizeText(label).toLowerCase();
+    try {
+      if (expectedRevision === null) {
+        // Idempotent no-op: an unlocked write of the exact stored text must not
+        // bump the revision. A case-only change is a real edit and is written.
+        // One atomic statement: the CASE arms compare the pre-write stored
+        // label (account_labels.label) against the incoming value (excluded.label)
+        // with IS, so a genuine no-op never bumps revision or updated_at even
+        // under concurrent writers.
+        const row = await this.d1.prepare(
+          `INSERT INTO account_labels (account_identity_id, label, label_norm) VALUES (?, ?, ?)
+           ON CONFLICT(account_identity_id) DO UPDATE SET
+             label = excluded.label, label_norm = excluded.label_norm,
+             revision = account_labels.revision + CASE WHEN account_labels.label IS excluded.label THEN 0 ELSE 1 END,
+             updated_at = CASE WHEN account_labels.label IS excluded.label THEN account_labels.updated_at ELSE datetime('now') END
+           RETURNING revision, label`
+        ).bind(identityId, label, labelNorm).first<{ revision: number; label: string }>();
+        if (row === null) throw new Error("upsertLabel: RETURNING produced no row");
+        return { ok: true, revision: row.revision };
+      }
+      const row = await this.d1.prepare(
+        `UPDATE account_labels SET label = ?, label_norm = ?, revision = revision + 1, updated_at = datetime('now')
+         WHERE account_identity_id = ? AND revision = ? RETURNING revision`
+      ).bind(label, labelNorm, identityId, expectedRevision).first<{ revision: number }>();
+      if (row) return { ok: true, revision: row.revision };
+      return { ok: false, reason: "revision_conflict" };
+    } catch (error) {
+      if (/UNIQUE constraint failed.*label_norm/i.test(error instanceof Error ? error.message : String(error))) {
+        return { ok: false, reason: "label_collision" };
+      }
+      throw error;
+    }
+  }
+
+  /** Direct scan of account_labels itself, so a label left on an identity with
+   * no current accounts row (missed by the accounts join) still blocks reuse. */
+  async labelNormCollision(labelNorm: string, excludeIdentityId: string): Promise<boolean> {
+    const row = await this.d1.prepare(
+      "SELECT 1 FROM account_labels WHERE label_norm = ? AND account_identity_id != ? LIMIT 1"
+    ).bind(labelNorm, excludeIdentityId).first();
+    return row !== null;
+  }
+
+  /**
+   * Clearing tombstones the row (label and label_norm set to NULL, revision
+   * bumped) rather than deleting it, so a revision never rewinds: a later
+   * set() continues from the revision the clear left behind instead of
+   * restarting at 1. Freeing label_norm also releases the normalized text for
+   * reuse by another identity (the UNIQUE index allows multiple NULLs).
+   *
+   * Unlocked clear is always success (no label left is the goal either way)
+   * and is a true no-op — no revision bump — when there is no row yet or the
+   * row is already tombstoned. Locked clear is success also when no row
+   * exists at all (goal already achieved); revision_conflict only when a row
+   * exists with a different revision than expected.
+   */
+  async deleteLabel(
+    identityId: string,
+    expectedRevision: number | null
+  ): Promise<{ ok: true; revision: number | null } | { ok: false; reason: "revision_conflict" }> {
+    if (expectedRevision === null) {
+      // Single atomic statement: only a live label (label IS NOT NULL) matches,
+      // so a genuine no-op (no row, or already tombstoned) never bumps revision.
+      const clearStmt = `UPDATE account_labels SET label = NULL, label_norm = NULL, revision = revision + 1, updated_at = datetime('now')
+         WHERE account_identity_id = ? AND label IS NOT NULL RETURNING revision`;
+      const row = await this.d1.prepare(clearStmt).bind(identityId).first<{ revision: number }>();
+      if (row) return { ok: true, revision: row.revision };
+      // Zero rows updated: either there is no row, it is already tombstoned
+      // (both are the goal already achieved), or a concurrent set() landed a
+      // live label between our UPDATE's WHERE evaluation and this read. Only
+      // the last case still needs clearing, so re-read and, if a live label
+      // is now present, run the same UPDATE once more.
+      const current = await this.d1.prepare(
+        "SELECT revision, label FROM account_labels WHERE account_identity_id = ?"
+      ).bind(identityId).first<{ revision: number; label: string | null }>();
+      if (!current || current.label === null) return { ok: true, revision: current?.revision ?? null };
+      const retried = await this.d1.prepare(clearStmt).bind(identityId).first<{ revision: number }>();
+      if (retried) return { ok: true, revision: retried.revision };
+      // The concurrent writer's label was itself cleared or replaced again in
+      // between; re-read once more rather than assuming success.
+      const after = await this.d1.prepare(
+        "SELECT revision, label FROM account_labels WHERE account_identity_id = ?"
+      ).bind(identityId).first<{ revision: number; label: string | null }>();
+      // Still live after two attempts: report a retryable conflict, never a false success.
+      if (after && after.label !== null) return { ok: false, reason: "revision_conflict" };
+      return { ok: true, revision: after?.revision ?? null };
+    }
+    const row = await this.d1.prepare(
+      `UPDATE account_labels SET label = NULL, label_norm = NULL, revision = revision + 1, updated_at = datetime('now')
+       WHERE account_identity_id = ? AND revision = ? AND label IS NOT NULL RETURNING revision`
+    ).bind(identityId, expectedRevision).first<{ revision: number }>();
+    if (row) return { ok: true, revision: row.revision };
+    const current = await this.d1.prepare(
+      "SELECT revision, label FROM account_labels WHERE account_identity_id = ?"
+    ).bind(identityId).first<{ revision: number; label: string | null }>();
+    if (!current || current.label === null) return { ok: true, revision: current?.revision ?? null };
+    return { ok: false, reason: "revision_conflict" };
   }
 }

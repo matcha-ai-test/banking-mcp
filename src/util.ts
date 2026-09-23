@@ -11,21 +11,51 @@ export async function rateLimitKey(request: Request, action: string): Promise<st
   return `${action}:${(await sha256Hex(client)).slice(0, 16)}`;
 }
 
+/** Opaque stable account reference (account_identities.id): 32 lowercase hex chars. */
+export const ACCOUNT_REF_RE = /^[0-9a-f]{32}$/;
+/** transactionKey output shape: sha256Hex is 64 lowercase hex chars. */
+export const TRANSACTION_KEY_RE = /^[0-9a-f]{64}$/;
+
 /**
- * Match an account by uid, name, bank, the full IBAN, or its last four digits
- * (what list_accounts shows). Arbitrary IBAN substrings are deliberately not
- * matched: a client that only sees a masked IBAN could otherwise reconstruct
- * it character by character from "No account matches" answers.
+ * Match an account by uid, name, bank, label, the opaque account_ref, or the
+ * full IBAN / last four digits (what list_accounts shows). Arbitrary IBAN
+ * substrings are deliberately not matched: a client that only sees a masked
+ * IBAN could otherwise reconstruct it character by character from "No
+ * account matches" answers.
+ *
+ * A label or account_ref is an exact, deliberately-chosen selector, so it
+ * takes precedence: if the filter exactly matches a label (case-insensitive)
+ * or an account_ref, only the row(s) sharing that identity are returned —
+ * never unioned with a same-string name/bank/IBAN hit on an unrelated
+ * account. Otherwise, fall back to the broader substring/uid/bank/IBAN match.
+ *
+ * account_ref outranks label: a raw string that is shaped like an
+ * account_ref and actually matches one identity's account_identity_id wins
+ * outright, even if some other identity happens to carry that same string as
+ * its label (set_account_label rejects such a label at write time, but a
+ * value forced into the DB by another path must still resolve unambiguously
+ * here). Only when no account_ref matches does a label match apply.
+ *
  * Returns null when no filter was given, otherwise the matching uids.
  */
 export function matchAccountUids(
-  rows: Array<AccountRow & { aspsp_name: string | null }>,
+  rows: Array<AccountRow & { aspsp_name: string | null; label?: string | null; account_identity_id?: string | null }>,
   account?: string
 ): string[] | null {
   const raw = (account ?? "").trim();
   if (!raw) return null;
   const lower = raw.toLowerCase();
+  const normalizedRaw = normalizeText(raw).toLowerCase();
   const digits = lower.replace(/[^a-z0-9]/g, "");
+
+  if (ACCOUNT_REF_RE.test(raw)) {
+    const refHits = rows.filter((a) => a.account_identity_id === raw);
+    if (refHits.length > 0) return refHits.map((a) => a.account_uid);
+  }
+
+  const labelHits = rows.filter((a) => a.label != null && normalizeText(a.label).toLowerCase() === normalizedRaw);
+  if (labelHits.length > 0) return labelHits.map((a) => a.account_uid);
+
   const hits = rows.filter((a) => {
     const iban = (a.iban ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
     const ibanHit =
@@ -38,6 +68,26 @@ export function matchAccountUids(
     );
   });
   return hits.map((a) => a.account_uid);
+}
+
+/** NFKC-normalize, trim, and collapse internal whitespace runs to a single space. */
+export function normalizeText(v: string): string {
+  return v.normalize("NFKC").trim().replace(/\s+/g, " ");
+}
+
+/**
+ * Heuristic screen for text that looks like it might contain an IBAN, used to
+ * reject user-supplied strings (labels, category names, rule patterns) before
+ * they are persisted. False positives on random alphanumerics are acceptable
+ * for a 60-256 character field; the value itself is never echoed back on a hit.
+ */
+export function containsIbanLike(text: string): boolean {
+  const compact = text
+    .normalize("NFKC")
+    .replace(/\p{Cf}/gu, "")
+    .replace(/[^a-zA-Z0-9]/g, "")
+    .toUpperCase();
+  return /[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}/.test(compact);
 }
 
 /** Keep account identifiers useful without returning the full IBAN by default. */

@@ -1,6 +1,7 @@
 import { aspspRows } from "./aspsps";
 import { Db } from "./db";
 import { EbClient, type Aspsp } from "./eb";
+import { assignAccountIdentities } from "./identity";
 import { AUTH_LINK_CMD } from "./mcp-output";
 import { authGatePage, esc, pageResponse } from "./pages";
 import { backfillAccounts } from "./sync";
@@ -59,6 +60,26 @@ export function accountMetadata(a: EbAccount): Pick<AccountRow, "cash_account_ty
     bic: typeof a.account_servicer?.bic_fi === "string" ? a.account_servicer.bic_fi : null,
     card_last4: digits.length >= 4 ? digits.slice(-4) : null,
   };
+}
+
+/**
+ * Prefer the singular identification_hash when the bank sent one; only fall
+ * back to identification_hashes[] when it collapses to exactly one distinct
+ * usable value. An array with two or more distinct values is ambiguous
+ * (which one is the stable identifier?) and is treated as no hash at all,
+ * same as an oversized or absent value.
+ */
+function resolveIdentificationHash(a: EbAccount): string | null {
+  if (typeof a.identification_hash === "string" && a.identification_hash.length >= 1 && a.identification_hash.length <= 2048) {
+    return a.identification_hash;
+  }
+  if (Array.isArray(a.identification_hashes)) {
+    const distinct = new Set(
+      a.identification_hashes.filter((h): h is string => typeof h === "string" && h.length >= 1 && h.length <= 2048)
+    );
+    if (distinct.size === 1) return [...distinct][0];
+  }
+  return null;
 }
 
 function operatorAuthorized(request: Request, env: Env): Promise<boolean> {
@@ -232,6 +253,8 @@ export async function handleAuthCallback(request: Request, env: Env): Promise<Re
       session_pk: sessionPk,
       name: a.name ?? a.details ?? a.product ?? null,
       iban: a.account_id?.iban ?? null,
+      identification_hash: resolveIdentificationHash(a),
+      account_identity_id: null,
       currency: a.currency ?? null,
       psu_type: psuType,
       product: a.product ?? null,
@@ -262,11 +285,23 @@ export async function handleAuthCallback(request: Request, env: Env): Promise<Re
     });
     await db.upsertAccounts(accountRows);
 
+    // Resolve each account's stable registry identity before folding, so the
+    // fold below can key on it. A conflicting identity fails closed: no fold,
+    // no annotation attach for that account, existing generations are left as-is.
+    const identities = await assignAccountIdentities(db, accountRows);
+
     // Re-auth mints fresh account_uids for the same IBANs; fold any prior generations into
     // the new uid so history stays under one account and the backfill's INSERT OR IGNORE
     // dedups against it. This also self-heals existing duplicates on the next bank authorization.
+    const batchUids = accountRows.map((a) => a.account_uid);
     for (const a of accountRows) {
-      const stale = await db.staleAccountGenerations(a.iban, a.currency, a.psu_type, a.account_uid);
+      const res = identities.get(a.account_uid);
+      if (res && !res.ok && (res.reason === "identity_conflict" || res.reason === "transient_error")) {
+        console.warn("identity conflict or transient error; generation left unfolded"); // counts/reason only
+        continue; // fail closed: no fold, no annotation attach
+      }
+      const identityId = res?.ok ? res.id : null;
+      const stale = await db.staleAccountGenerations(a.iban, a.currency, a.psu_type, a.account_uid, identityId, batchUids);
       for (const oldUid of stale) {
         const r = await db.foldAccountGeneration(oldUid, a.account_uid);
         // Counts only: account identifiers do not belong in Worker logs.

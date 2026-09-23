@@ -1,12 +1,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpAgent } from "agents/mcp";
 import { z } from "zod";
+import { initializeStorage } from "./bootstrap";
 import { Db } from "./db";
 import { EbClient } from "./eb";
 import { readAuthStatus } from "./auth-status";
 import { readTransactionDetails } from "./transaction-details";
 import { buildStatementExport } from "./export";
-import { migrate } from "./migrate";
+import { checkMutationBudget, enforceArgBudget } from "./mutation-guard";
 import {
   AUTH_LINK_CMD,
   buildAuthStatus,
@@ -17,12 +18,13 @@ import {
 } from "./mcp-output";
 import { previewEnrichmentCandidates, syncAll } from "./sync";
 import type { Env } from "./types";
-import { maskIban, matchAccountUids } from "./util";
+import { ACCOUNT_REF_RE, containsIbanLike, maskIban, matchAccountUids, normalizeText } from "./util";
+import { canonicalIban } from "./identity";
 
 /** Guides clients through cached reads, budgeted refreshes, and operator-controlled renewal. */
 const SERVER_INSTRUCTIONS = `banking-mcp is a read-only mirror of the operator's bank accounts (Enable Banking, PSD2). Tools read a local cache filled by a nightly sync unless a live call is explicitly requested. Nothing here moves money or writes to a bank.
 
-Normal order: list_accounts to resolve accounts, then get_balances or get_transactions, then export_statements for bulk history. Account uids change after every re-authorization: always match on account name or IBAN, never on a hardcoded uid. For totals and breakdowns use spending_summary, which sums in the database, rather than adding up transaction rows yourself. list_banks answers which banks Enable Banking supports from a local cache.
+Normal order: list_accounts to resolve accounts, then get_balances or get_transactions, then export_statements for bulk history. Account uids change after every re-authorization: prefer account_ref or a label over account_uid, since uids rotate. For totals and breakdowns use spending_summary, which sums in the database, rather than adding up transaction rows yourself. list_banks answers which banks Enable Banking supports from a local cache.
 
 Rows whose bank text is only the account holder's own name are automatically enriched from the bank's detail record during sync (capped per night); get_transaction_details returns the cached detail for free and only calls the bank when no detail is cached yet (one bank fetch from the daily budget). Enrichment's backfill window and per-account/per-session caps are configurable, both per refresh_now call and, for the nightly sync, via optional Worker vars — the built-in figures (45 days, 3 per account, 6 per bank session) are conservative starting recommendations, not fixed defaults or documented bank limits. Preview a run with refresh_now's enrichment_dry_run before spending live budget.
 
@@ -66,14 +68,14 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
   }
 
   async init() {
-    await migrate(this.env.DB);
+    await initializeStorage(this.env);
     this.cfg = this.env;
 
     this.server.registerTool(
       "list_accounts",
       {
         description:
-          "List linked accounts, latest known balances, and last sync time from the local cache. Use first to resolve account names and IBANs because uids rotate after re-authorization. No bank call or refresh-budget cost.",
+          "List linked accounts, latest known balances, and last sync time from the local cache. Use first to resolve account names and IBANs because uids rotate after re-authorization. account_ref is a stable opaque reference (from the stable-identity registry) that survives re-authorization and is the value set_account_label expects; it is absent when the bank supplied neither an IBAN nor an identification hash. No bank call or refresh-budget cost.",
         inputSchema: {},
       },
       async () => {
@@ -83,6 +85,9 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
           account_uid: a.account_uid,
           bank: a.aspsp_name,
           name: a.name,
+          account_ref: a.account_identity_id ?? null,
+          label: a.label ?? null,
+          label_revision: a.label_revision ?? null,
           iban: maskIban(a.iban),
           currency: a.currency,
           psu_type: a.psu_type,
@@ -98,6 +103,129 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
           last_synced_at: a.last_synced_at,
         }));
         return this.text(warning, compactJson(out));
+      }
+    );
+
+    this.server.registerTool(
+      "set_account_label",
+      {
+        description:
+          "Attach or clear a personal label on one linked account. The label is stored locally, survives re-authorization, and becomes an accepted value of every account filter. Never writes to the bank.",
+        inputSchema: {
+          account_ref: z.string().regex(/^[0-9a-f]{32}$/).describe("Opaque stable account reference from list_accounts"),
+          label: z.string().max(60).nullable().describe("New label; null clears it"),
+          expected_revision: z.number().int().min(1).optional().describe("Optimistic lock: the label_revision from list_accounts, or the revision returned by a previous set_account_label response; omit to create or overwrite"),
+          dry_run: z.boolean().optional(),
+        },
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+      },
+      async ({ account_ref, label, expected_revision, dry_run }) => {
+        const db = this.db();
+        if (!enforceArgBudget({ account_ref, label, expected_revision, dry_run })) {
+          return this.text("", { error: "invalid_argument", field: "args", reason: "too_large" });
+        }
+        // Everything below touches storage; any unexpected failure (including a
+        // stubbed or thrown D1 error) must return a sanitized error, never a D1
+        // message or SQL text.
+        try {
+          const identity = await db.identityById(account_ref);
+          if (!identity) return this.text("", { error: "not_found" });
+
+          let clean: string | null = null;
+          if (label !== null) {
+            clean = normalizeText(label);
+            if (clean.length < 3 || clean.length > 60) {
+              return this.text("", { error: "invalid_argument", field: "label", reason: "length" });
+            }
+            if (/[\u0000-\u001f\u007f]/.test(label)) {
+              return this.text("", { error: "invalid_argument", field: "label", reason: "control_character" });
+            }
+            // Checked before containsIbanLike: an account_ref (32 hex) or a
+            // dashed UUID reliably also looks IBAN-shaped, but the more
+            // specific, more actionable answer here is label_collision, not
+            // the generic "looks like an account number".
+            if (ACCOUNT_REF_RE.test(clean.toLowerCase()) || /^[0-9a-f-]{36}$/i.test(clean)) {
+              return this.text("", { error: "label_collision" });
+            }
+            // A label that is purely 1-4 digits reads as a PIN, last-4, or
+            // short account number rather than a name; reject it the same
+            // way as an actual last-4/card collision.
+            if (/^\d{1,4}$/.test(clean)) {
+              return this.text("", { error: "label_collision" });
+            }
+            if (containsIbanLike(clean)) {
+              return this.text("", { error: "text_looks_like_account_number" });
+            }
+          }
+
+          // Computed before any write, so dry_run and a real write report the same list.
+          const uids = await db.accountUidsForIdentity(account_ref);
+          const allAccounts = await db.allAccountsWithBank();
+          const accounts = allAccounts
+            .filter((a) => uids.includes(a.account_uid))
+            .map((a) => ({ name: a.name, iban: maskIban(a.iban) }));
+
+          if (clean !== null) {
+            const cleanLower = clean.toLowerCase();
+            // Structural collision: a label must never be confusable with an
+            // opaque identifier the same filter argument could also resolve —
+            // any live account_uid or account_identity_id, including this
+            // identity's own. (The ACCOUNT_REF_RE/UUID shape itself was
+            // already rejected above, before the IBAN-shape check.)
+            const matchesUidOrIdentity = allAccounts.some(
+              (a) =>
+                a.account_uid.toLowerCase() === cleanLower ||
+                (a.account_identity_id != null && a.account_identity_id.toLowerCase() === cleanLower)
+            );
+            const collides =
+              matchesUidOrIdentity ||
+              allAccounts.some((a) => {
+                if (uids.includes(a.account_uid)) return false; // this identity's own accounts are fine
+                const nameHit = a.name != null && normalizeText(a.name).toLowerCase() === cleanLower;
+                const bankHit = a.aspsp_name != null && normalizeText(a.aspsp_name).toLowerCase() === cleanLower;
+                const labelHit = a.label != null && normalizeText(a.label).toLowerCase() === cleanLower;
+                const ibanCanon = canonicalIban(a.iban);
+                const ibanLast4Hit = ibanCanon != null && ibanCanon.length >= 4 && ibanCanon.slice(-4).toLowerCase() === cleanLower;
+                const cardHit = a.card_last4 != null && a.card_last4.toLowerCase() === cleanLower;
+                return nameHit || bankHit || labelHit || ibanLast4Hit || cardHit;
+              });
+            // Read account_labels directly too: a label left on an identity with
+            // no current accounts row would otherwise be invisible to the join above.
+            const labelCollides = collides ? true : await db.labelNormCollision(cleanLower, account_ref);
+            if (collides || labelCollides) return this.text("", { error: "label_collision" });
+          }
+
+          if (dry_run) {
+            return this.text("", {
+              dry_run: true,
+              account_ref,
+              label: clean,
+              would: label === null ? "clear" : "set",
+              accounts: compactJson(accounts),
+            });
+          }
+
+          if (!(await checkMutationBudget(db))) {
+            return this.text("", { error: "rate_limited" });
+          }
+
+          const expectedRevision = expected_revision ?? null;
+          let revision: number | null = null;
+          if (clean === null) {
+            // Clearing without a lock is idempotent: no label left is the goal either way.
+            const deleteResult = await db.deleteLabel(account_ref, expectedRevision);
+            if (!deleteResult.ok) return this.text("", { error: deleteResult.reason });
+            revision = deleteResult.revision;
+          } else {
+            const result = await db.upsertLabel(account_ref, clean, expectedRevision);
+            if (!result.ok) return this.text("", { error: result.reason });
+            revision = result.revision;
+          }
+          return this.text("", { account_ref, label: clean, revision, accounts: compactJson(accounts) });
+        } catch {
+          // Never surface a D1 message or SQL text to the client.
+          return this.text("", { error: "invalid_argument", field: "storage", reason: "write_failed" });
+        }
       }
     );
 
