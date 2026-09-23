@@ -19,6 +19,23 @@ const STATEMENTS = [
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`,
+  `CREATE TABLE IF NOT EXISTS account_identities (
+    id TEXT PRIMARY KEY,
+    iban TEXT,
+    identification_hash TEXT,
+    currency TEXT NOT NULL,
+    psu_type TEXT NOT NULL CHECK (psu_type IN ('personal','business')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    CHECK (iban IS NOT NULL OR identification_hash IS NOT NULL),
+    CHECK (iban IS NULL OR length(iban) BETWEEN 5 AND 34),
+    CHECK (identification_hash IS NULL OR length(identification_hash) BETWEEN 1 AND 2048),
+    CHECK (currency = '' OR (length(currency) = 3 AND currency NOT GLOB '*[^A-Z]*'))
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_identity_iban
+    ON account_identities(iban, currency, psu_type) WHERE iban IS NOT NULL`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_identity_hash
+    ON account_identities(identification_hash, currency, psu_type) WHERE identification_hash IS NOT NULL`,
   `CREATE TABLE IF NOT EXISTS accounts (
     account_uid TEXT PRIMARY KEY,
     session_pk TEXT NOT NULL REFERENCES eb_sessions(id) ON DELETE CASCADE,
@@ -33,7 +50,9 @@ const STATEMENTS = [
     credit_limit_cents INTEGER,
     usage TEXT,
     bic TEXT,
-    card_last4 TEXT
+    card_last4 TEXT,
+    identification_hash TEXT,
+    account_identity_id TEXT REFERENCES account_identities(id) ON DELETE RESTRICT
   )`,
   `CREATE TABLE IF NOT EXISTS transactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,6 +124,15 @@ const STATEMENTS = [
     fetched_at TEXT NOT NULL,
     PRIMARY KEY (name, country)
   )`,
+  `CREATE TABLE IF NOT EXISTS account_labels (
+    account_identity_id TEXT PRIMARY KEY REFERENCES account_identities(id) ON DELETE RESTRICT,
+    label TEXT CHECK (label IS NULL OR length(label) BETWEEN 1 AND 60),
+    label_norm TEXT,
+    revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_account_labels_norm ON account_labels(label_norm)`,
 ];
 
 const ADDITIVE_STATEMENTS = [
@@ -119,6 +147,12 @@ const ADDITIVE_STATEMENTS = [
   "ALTER TABLE eb_sessions ADD COLUMN last_live_result TEXT",
   "ALTER TABLE eb_sessions ADD COLUMN live_verify_claimed_at TEXT NULL",
   "ALTER TABLE eb_sessions ADD COLUMN live_verify_result TEXT NULL",
+  "ALTER TABLE accounts ADD COLUMN identification_hash TEXT",
+  "ALTER TABLE accounts ADD COLUMN account_identity_id TEXT REFERENCES account_identities(id) ON DELETE RESTRICT",
+];
+
+const POST_ADDITIVE_STATEMENTS = [
+  "CREATE INDEX IF NOT EXISTS idx_accounts_identity ON accounts(account_identity_id)",
 ];
 
 function isDuplicateColumnError(error: unknown): boolean {
@@ -138,5 +172,10 @@ export async function migrate(db: D1Database): Promise<void> {
     } catch (error) {
       if (!isDuplicateColumnError(error)) throw error;
     }
+  }
+  // Runs after the additive loop: an index on a column that did not exist
+  // before the ALTER above would fail on an old database if run earlier.
+  for (const sql of POST_ADDITIVE_STATEMENTS) {
+    await db.prepare(sql).run();
   }
 }
