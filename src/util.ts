@@ -70,9 +70,19 @@ export function matchAccountUids(
   return hits.map((a) => a.account_uid);
 }
 
-/** NFKC-normalize, trim, and collapse internal whitespace runs to a single space. */
+/**
+ * NFKC-normalize, drop invisible characters (format controls such as U+200B
+ * and every other default-ignorable code point, e.g. U+3164 HANGUL FILLER),
+ * trim, and collapse internal whitespace runs to a single space. A label made
+ * only of invisible characters therefore normalizes to "" and fails the
+ * length check, and two labels that render identically compare equal.
+ */
 export function normalizeText(v: string): string {
-  return v.normalize("NFKC").trim().replace(/\s+/g, " ");
+  return v
+    .normalize("NFKC")
+    .replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, "")
+    .trim()
+    .replace(/\s+/g, " ");
 }
 
 /**

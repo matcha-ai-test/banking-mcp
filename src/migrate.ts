@@ -149,6 +149,7 @@ const ADDITIVE_STATEMENTS = [
   "ALTER TABLE eb_sessions ADD COLUMN live_verify_result TEXT NULL",
   "ALTER TABLE accounts ADD COLUMN identification_hash TEXT",
   "ALTER TABLE accounts ADD COLUMN account_identity_id TEXT REFERENCES account_identities(id) ON DELETE RESTRICT",
+  "ALTER TABLE accounts ADD COLUMN identity_conflict_key TEXT",
 ];
 
 const POST_ADDITIVE_STATEMENTS = [

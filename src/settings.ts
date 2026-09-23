@@ -10,7 +10,7 @@ const PLACEHOLDERS = new Set([
   "generated-bank-link-token",
 ]);
 
-function isRealSecret(value: string | undefined): boolean {
+export function isRealSecret(value: string | undefined): value is string {
   return typeof value === "string" && value.length > 0 && !PLACEHOLDERS.has(value);
 }
 

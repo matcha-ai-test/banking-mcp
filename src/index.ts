@@ -4,6 +4,7 @@ import { handleAuthCallback, handleAuthSession, handleAuthStart } from "./auth";
 import { ensureIdentityBackfill } from "./bootstrap";
 import { Db } from "./db";
 import { EbClient } from "./eb";
+import { guardedApiHandler, refreshGrantCheck } from "./grant-guard";
 import { migrate } from "./migrate";
 import { BankingMCP } from "./mcp";
 import { handleAuthorize } from "./oauth";
@@ -11,7 +12,7 @@ import { homePage, privacyPage, termsPage } from "./pages";
 import { isConfigured } from "./settings";
 import { enrichmentPolicyFromEnv, syncAll } from "./sync";
 import type { Env } from "./types";
-import { mcpGateDecision, wrongPasswordResponse } from "./util";
+import { mcpGateDecision, rateLimitKey, wrongPasswordResponse } from "./util";
 
 export { BankingMCP };
 
@@ -44,7 +45,7 @@ const defaultHandler = {
       if (path === "/terms") return termsPage();
       if (path === "/") return homePage(isConfigured(env));
       if (path === "/auth/start") {
-        if (!isConfigured(env)) return new Response("Not configured. Run npm run install:mcp from the repository.", { status: 503 });
+        if (!isConfigured(env)) return new Response(NOT_CONFIGURED, { status: 503 });
         return await handleAuthStart(request, env);
       }
       if (path === "/auth/session") {
@@ -61,20 +62,44 @@ const defaultHandler = {
   },
 };
 
-const oauthProvider = new OAuthProvider({
-  apiRoute: "/mcp",
-  apiHandler: mcpHandler as never,
-  defaultHandler: defaultHandler as never,
-  authorizeEndpoint: "/authorize",
-  tokenEndpoint: "/token",
-  clientRegistrationEndpoint: "/register",
-  // claude.ai's default client option "Use Claude's published identity" sends
-  // an https URL as client_id. Without this the provider answers
-  // "Invalid client_id" on every first connection attempt. The library
-  // requires the global_fetch_strictly_public compatibility flag, which
-  // wrangler.jsonc sets, before it advertises the capability.
-  clientIdMetadataDocumentEnabled: true,
-});
+// OAuth-authenticated /mcp requests pass the grant binding check (grant.ts) first.
+const oauthApiHandler = guardedApiHandler(mcpHandler);
+
+function createOAuthProvider(env: Env): OAuthProvider {
+  return new OAuthProvider({
+    apiRoute: "/mcp",
+    apiHandler: oauthApiHandler as never,
+    defaultHandler: defaultHandler as never,
+    authorizeEndpoint: "/authorize",
+    tokenEndpoint: "/token",
+    clientRegistrationEndpoint: "/register",
+    // claude.ai's default client option "Use Claude's published identity" sends
+    // an https URL as client_id. Without this the provider answers
+    // "Invalid client_id" on every first connection attempt. The library
+    // requires the global_fetch_strictly_public compatibility flag, which
+    // wrangler.jsonc sets, before it advertises the capability.
+    clientIdMetadataDocumentEnabled: true,
+    tokenExchangeCallback: refreshGrantCheck(env),
+  });
+}
+
+const providers = new WeakMap<Env, OAuthProvider>();
+function oauthProviderFor(env: Env): OAuthProvider {
+  let provider = providers.get(env);
+  if (!provider) {
+    provider = createOAuthProvider(env);
+    providers.set(env, provider);
+  }
+  return provider;
+}
+
+/** OAuth endpoints that must stay closed until real secrets are installed. */
+const OAUTH_ENDPOINTS = new Set(["/authorize", "/token", "/register"]);
+const NOT_CONFIGURED = "Not configured. Run npm run install:mcp from the repository.";
+
+/** Failed /mcp connection-password attempts allowed per client bucket per window. */
+const MCP_FAILURES_PER_WINDOW = 20;
+const MCP_FAILURE_WINDOW_MS = 10 * 60_000;
 
 /** Pages Enable Banking fetches during app registration; they must not need D1. */
 const STATIC_PATHS = new Set(["/", "/privacy", "/terms"]);
@@ -103,19 +128,35 @@ export default {
         return await defaultHandler.fetch(request, resolved, ctx);
       }
 
+      // Discovery under /.well-known stays reachable: it is static metadata
+      // and every endpoint it advertises answers 503 below until configured.
+      if (OAUTH_ENDPOINTS.has(path) && !isConfigured(resolved)) {
+        return new Response(NOT_CONFIGURED, { status: 503 });
+      }
+
       if (path === "/mcp" || path.startsWith("/mcp/")) {
         if (!isConfigured(resolved)) {
-          return new Response("Not configured. Run npm run install:mcp from the repository.", { status: 503 });
+          return new Response(NOT_CONFIGURED, { status: 503 });
         }
         // Bearer for Codex and CLI clients, an API key header for claude.ai
         // "No sign-in" connectors (which reserve Authorization). Both are
         // compared timing-safely against MCP_SECRET.
         const decision = await mcpGateDecision(request, resolved.MCP_SECRET);
         if (decision === "allow") return await mcpHandler.fetch(request, resolved, ctx);
-        if (decision === "reject") return wrongPasswordResponse();
+        if (decision === "reject") {
+          // Only failures are counted; a correct password never touches the limiter.
+          const key = await rateLimitKey(request, "mcp-secret-fail");
+          if (!(await new Db(resolved).rateLimitOk(key, MCP_FAILURES_PER_WINDOW, MCP_FAILURE_WINDOW_MS))) {
+            return new Response("Too many attempts", {
+              status: 429,
+              headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", "Retry-After": "600" },
+            });
+          }
+          return wrongPasswordResponse();
+        }
       }
 
-      return await oauthProvider.fetch(request, resolved as never, ctx);
+      return await oauthProviderFor(resolved).fetch(request, resolved as never, ctx);
     } catch (e) {
       console.error("Unhandled worker error", { name: (e as Error).name });
       return new Response("Internal error", { status: 500 });

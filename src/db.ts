@@ -730,6 +730,12 @@ export class Db {
     return row?.account_identity_id ?? null;
   }
 
+  /** Remember a fail-closed resolution so the backfill stops retrying it; only on a row still without a pointer. */
+  async markIdentityConflict(uid: string, conflictKey: string): Promise<void> {
+    await this.d1.prepare("UPDATE accounts SET identity_conflict_key = ? WHERE account_uid = ? AND account_identity_id IS NULL")
+      .bind(conflictKey, uid).run();
+  }
+
   async accountsWithoutIdentity(): Promise<AccountRow[]> {
     const r = await this.d1.prepare(
       "SELECT * FROM accounts WHERE account_identity_id IS NULL AND (iban IS NOT NULL OR identification_hash IS NOT NULL) ORDER BY created_at ASC"

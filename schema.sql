@@ -52,7 +52,11 @@ CREATE TABLE IF NOT EXISTS accounts (
   bic TEXT,
   card_last4 TEXT,
   identification_hash TEXT,
-  account_identity_id TEXT REFERENCES account_identities(id) ON DELETE RESTRICT
+  account_identity_id TEXT REFERENCES account_identities(id) ON DELETE RESTRICT,
+  -- Set when identity resolution failed closed for this row's current natural
+  -- identity; the backfill skips the row until its inputs change or the
+  -- operator resolves it (npm run identity:resolve).
+  identity_conflict_key TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_accounts_identity ON accounts(account_identity_id);
 

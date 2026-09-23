@@ -94,3 +94,27 @@ function isEmpty(value: unknown): boolean {
   if (typeof value === "object") return Object.keys(value as object).length === 0;
   return false;
 }
+
+/**
+ * Wraps a tool handler so an unexpected exception (a D1 failure, an SDK bug)
+ * reaches the client as a generic error instead of the MCP SDK's default,
+ * which echoes the exception message and can carry SQL or D1 text. Only the
+ * tool name and the error's class name are logged. Intentional errors are
+ * returned by the handlers themselves and pass through unchanged.
+ */
+export function toolErrorBoundary<A extends unknown[], R>(
+  name: string,
+  handler: (...args: A) => R | Promise<R>
+): (...args: A) => Promise<R | { content: Array<{ type: "text"; text: string }>; isError: true }> {
+  return async (...args: A) => {
+    try {
+      return await handler(...args);
+    } catch (error) {
+      console.error("tool failed", { tool: name, error: (error as Error)?.name ?? "unknown" });
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ error: "internal_error", reason: "unexpected_failure" }) }],
+        isError: true as const,
+      };
+    }
+  };
+}

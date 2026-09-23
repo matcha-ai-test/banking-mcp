@@ -15,6 +15,7 @@ import {
   compactJson,
   REFRESH_BUDGET_PER_DAY,
   serializeMcpText,
+  toolErrorBoundary,
 } from "./mcp-output";
 import { previewEnrichmentCandidates, syncAll } from "./sync";
 import type { Env } from "./types";
@@ -47,6 +48,10 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
   /** Worker bindings and encrypted secrets supplied by Wrangler. */
   private cfg!: Env;
 
+  /** registerTool behind toolErrorBoundary: every tool, present and future, answers failures generically. */
+  private tool: McpServer["registerTool"] = ((name: string, config: never, handler: (...args: unknown[]) => unknown) =>
+    this.server.registerTool(name, config, toolErrorBoundary(name, handler) as never)) as never;
+
   private db(): Db {
     return new Db(this.cfg);
   }
@@ -71,7 +76,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
     await initializeStorage(this.env);
     this.cfg = this.env;
 
-    this.server.registerTool(
+    this.tool(
       "list_accounts",
       {
         description:
@@ -106,7 +111,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       }
     );
 
-    this.server.registerTool(
+    this.tool(
       "set_account_label",
       {
         description:
@@ -229,7 +234,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       }
     );
 
-    this.server.registerTool(
+    this.tool(
       "get_balances",
       {
         description:
@@ -256,7 +261,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       }
     );
 
-    this.server.registerTool(
+    this.tool(
       "get_transactions",
       {
         description:
@@ -306,7 +311,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       }
     );
 
-    this.server.registerTool(
+    this.tool(
       "spending_summary",
       {
         description:
@@ -354,7 +359,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       }
     );
 
-    this.server.registerTool(
+    this.tool(
       "amount_as_work_time",
       {
         description:
@@ -404,7 +409,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       }
     );
 
-    this.server.registerTool(
+    this.tool(
       "list_banks",
       {
         description:
@@ -433,7 +438,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       }
     );
 
-    this.server.registerTool(
+    this.tool(
       "get_transaction_details",
       {
         description:
@@ -454,7 +459,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       }
     );
 
-    this.server.registerTool(
+    this.tool(
       "export_statements",
       {
         description:
@@ -476,7 +481,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       }
     );
 
-    this.server.registerTool(
+    this.tool(
       "refresh_now",
       {
         description:
@@ -571,7 +576,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       }
     );
 
-    this.server.registerTool(
+    this.tool(
       "get_auth_status",
       {
         description:
