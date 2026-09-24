@@ -13,6 +13,7 @@ import {
   addRule,
   annotateTransactions,
   categorizeTransaction,
+  categoryFields,
   CategoryIdSchema,
   clearTransactionCategory,
   createCategory,
@@ -287,7 +288,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       "get_transactions",
       {
         description:
-          "Get cached booked transactions, newest first, and pending transactions when include_pending is true. Use for interactive transaction questions; supports date range, free-text search, and limit. The account filter accepts name, IBAN, last-4, uid, or bank name. Each row carries its local category (category, category_source, category_rule_id) plus the account_ref and transaction_key selectors categorize_transaction expects. No bank call or refresh-budget cost.",
+          "Get cached booked transactions, newest first, and pending transactions when include_pending is true. Use for interactive transaction questions; supports date range, free-text search, and limit. The account filter accepts name, IBAN, last-4, uid, or bank name. Each row carries amount_cents and its local category (category, category_source, category_rule_id) plus the account_ref and transaction_key selectors categorize_transaction expects; compact keeps only category and category_source. No bank call or refresh-budget cost.",
         inputSchema: {
           account: z.string().optional().describe("Account name, IBAN, uid or bank name. Omit for all accounts."),
           date_from: z.string().optional().describe("YYYY-MM-DD (inclusive)"),
@@ -295,7 +296,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
           search: z.string().optional().describe("Free-text match on counterparty/description"),
           limit: z.number().int().min(1).max(500).default(100),
           include_pending: z.boolean().default(true),
-          compact: z.boolean().optional().describe("Drop null and empty fields from each row to save context. Omit for the full row shape."),
+          compact: z.boolean().optional().describe("Drop null and empty fields, and the write selectors (account_ref, transaction_key, category ids), from each row to save context. Omit for the full row shape."),
         },
       },
       async ({ account, date_from, date_to, search, limit, include_pending, compact }) => {
@@ -315,6 +316,8 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
           account: nameOf(r.account_uid),
           booking_date: r.booking_date,
           amount: signed(r.amount_cents, r.credit_debit),
+          // Signed integer cents: pass straight to categorize_transaction's expected.amount_cents.
+          amount_cents: r.credit_debit === "DBIT" ? -Math.abs(r.amount_cents) : Math.abs(r.amount_cents),
           currency: r.currency,
           counterparty: r.counterparty,
           description: r.remittance_info,
@@ -323,8 +326,8 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
 
         const warning = await this.warnings(db);
         const payload = {
-          booked: booked.map((r, i) => ({ ...mapRow(r), ...categories.booked[i] })),
-          ...(include_pending ? { pending: pendingRows.map((r, i) => ({ ...mapRow(r, "PENDING"), ...categories.pending[i] })) } : {}),
+          booked: booked.map((r, i) => ({ ...mapRow(r), ...categoryFields(categories.booked[i], compact) })),
+          ...(include_pending ? { pending: pendingRows.map((r, i) => ({ ...mapRow(r, "PENDING"), ...categoryFields(categories.pending[i], compact) })) } : {}),
           note: "Amounts are signed: negative = money out, positive = money in. Cached data: see last_synced_at via list_accounts.",
         };
         return this.text(warning, compact ? compactJson(payload) : payload);
@@ -374,6 +377,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
             .map((t) => ({ currency: t.currency, out: money(t.out), in: money(t.in), net: money(t.in - t.out), count: t.count })),
           groups: rows.map((r) => ({
             [group_by]: group_by === "account" ? nameOf(r.key) : r.key,
+            ...("category_id" in r ? { category_id: r.category_id } : {}),
             currency: r.currency,
             out: money(r.out_cents),
             in: money(r.in_cents),
@@ -644,7 +648,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       "rename_category",
       {
         description:
-          "Rename a local category by category_id. Rules and manual categorizations keep pointing at the same id. expected_revision is the revision from list_categories; a stale value returns revision_conflict.",
+          "Rename a local category by category_id. Rules and manual categorizations keep pointing at the same id. expected_revision is the revision from list_categories; a stale value returns revision_conflict, except that renaming to the current name returns unchanged:true.",
         inputSchema: {
           category_id: CategoryIdSchema,
           name: z.string().min(1).max(80),
@@ -675,7 +679,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       "add_rule",
       {
         description:
-          "Add a local categorization rule. rule_id is a UUID you generate; retrying with the same id and identical content is a no-op, different content returns idempotency_conflict. All given predicates must match (AND); text matching is literal (exact or contains, never regex). direction is required and never guessed from the amount sign: out = money out (the counterparty is the recipient), in = money in. An amount range needs currency. A rule for all accounts needs a text or amount predicate. Higher priority wins; ties go to the older rule. Run preview_rule or dry_run first, and add only after the user confirms. At most 500 rules.",
+          "Add a local categorization rule. rule_id is a UUID you generate; retrying with the same id and identical content is a no-op, different content returns idempotency_conflict. A deleted rule's id is not reserved: retrying add_rule after a delete creates the rule again. All given predicates must match (AND); text matching is literal (exact or contains, never regex) and case-insensitive via simple lowercasing, not full case folding (ß does not match SS). direction is required and never guessed from the amount sign: out = money out (the counterparty is the recipient), in = money in. An amount range needs currency. A rule for all accounts needs a text or amount predicate. Higher priority wins; ties go to the older rule. Run preview_rule or dry_run first, and add only after the user confirms. At most 500 rules.",
         inputSchema: {
           rule_id: CategoryIdSchema.describe("Client-generated UUID; the idempotency key and the rule's permanent id"),
           rule: RuleSchema,
@@ -692,7 +696,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       "update_rule",
       {
         description:
-          "Replace every field of a local rule (omitted optional predicates are cleared); the id and creation order are kept. expected_revision comes from list_rules or the last write; a stale value returns revision_conflict. Only after the user confirms.",
+          "Replace every field of a local rule (omitted optional predicates are cleared); the id and creation order are kept. expected_revision comes from list_rules or the last write; a stale value returns revision_conflict, except that a retry whose content is already stored returns unchanged:true. Only after the user confirms.",
         inputSchema: {
           rule_id: CategoryIdSchema,
           rule: RuleSchema,
@@ -710,13 +714,13 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       "list_rules",
       {
         description:
-          "List local categorization rules in evaluation order (priority high to low, then oldest first), with revision and rank. account_ref returns that account's rules plus all-account rules. Paginate with after_id. Cache-only.",
+          "List local categorization rules in evaluation order (priority high to low, then oldest first), with revision and rank. account_ref returns that account's rules plus all-account rules. Paginate by passing next_cursor back as cursor. Cache-only.",
         inputSchema: {
           account_ref: AccountRefSchema.optional(),
           category_id: CategoryIdSchema.optional(),
           enabled: z.boolean().optional(),
           limit: z.number().int().min(1).max(100).optional().describe("Default 100"),
-          after_id: CategoryIdSchema.optional().describe("next_after_id from the previous page"),
+          cursor: z.string().max(512).optional().describe("next_cursor from the previous page"),
         },
         annotations: { readOnlyHint: true, openWorldHint: false },
       },
@@ -765,11 +769,11 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       "categorize_transaction",
       {
         description:
-          "Manually set the local category of one booked transaction; this beats every rule. Pass account_ref and transaction_key from get_transactions, plus the row's booking_date, signed amount in cents and currency as a safety check. category_id null marks it explicitly uncategorized (rules stop applying). expected_revision is 0 to create, otherwise category_override_revision from get_transactions. Pending rows cannot be categorized. Only after the user confirms.",
+          "Manually set the local category of one booked transaction; this beats every rule. Pass account_ref, transaction_key, booking_date, amount_cents (signed integer cents) and currency exactly as get_transactions returns them; the facts are a safety check. category_id null marks it explicitly uncategorized (rules stop applying). expected_revision is 0 to create, otherwise category_override_revision from get_transactions; if the requested category is already set, any expected_revision returns unchanged:true. Pending rows cannot be categorized. Only after the user confirms.",
         inputSchema: {
           account_ref: AccountRefSchema,
           transaction_key: TransactionKeySchema,
-          expected: ExpectedTransactionSchema,
+          expected: ExpectedTransactionSchema.describe("booking_date, amount_cents and currency of the row, copied from get_transactions"),
           category_id: CategoryIdSchema.nullable(),
           expected_revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
           dry_run: z.boolean().optional(),

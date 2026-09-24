@@ -47,7 +47,7 @@ function self(db, uids = null) {
   return { db: () => db, resolveAccountUids: async () => uids, warnings: async () => "", text: serializeMcpText };
 }
 const deps = { compactJson, AUTH_LINK_CMD };
-const { annotateTransactions } = await import("../src/categories.ts");
+const { annotateTransactions, categoryFields } = await import("../src/categories.ts");
 const parse = (r) => JSON.parse(r.content[0].text);
 
 // ---- 5.1 terminal session codes ----
@@ -204,7 +204,7 @@ test("compactJson drops null, empty and undefined but keeps zero and false; get_
   await seedTransactions(db);
   const source = readFileSync(new URL("../src/mcp.ts", import.meta.url), "utf8");
   const signed = Function(`${stripTypeScriptTypes(source.slice(source.indexOf("function money("), source.indexOf("export class BankingMCP")))}; return signed;`)();
-  const run = async (input) => parse(await handler("get_transactions", { ...deps, signed, annotateTransactions }).call(self(db), { limit: 100, include_pending: true, ...input }));
+  const run = async (input) => parse(await handler("get_transactions", { ...deps, signed, annotateTransactions, categoryFields }).call(self(db), { limit: 100, include_pending: true, ...input }));
   const full = await run({});
   const compact = await run({ compact: true });
   assert.equal("description" in full.booked[0], true);

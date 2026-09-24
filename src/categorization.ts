@@ -93,6 +93,8 @@ export interface CategoryResult {
   category_warning?: "override_identity_conflict" | "text_too_long" | "rules_unavailable";
 }
 
+const isInt = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v);
+
 /** Deterministic evaluation order: priority DESC, created_at ASC, id ASC (binary, not locale). */
 export function compareRules(a: { priority: number; createdAt: string; id: string }, b: { priority: number; createdAt: string; id: string }): number {
   if (a.priority !== b.priority) return b.priority - a.priority;
@@ -100,13 +102,12 @@ export function compareRules(a: { priority: number; createdAt: string; id: strin
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
-const isInt = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v);
-
 /**
  * Compile one stored rule, re-validating every invariant the DDL also enforces.
- * Returns null for a malformed row; callers treat any null as "rules
- * unavailable" for the whole request rather than silently skipping a rule
- * that might have outranked the one that would then win.
+ * Returns null for a malformed row. The write path runs this exact function
+ * on the row it is about to store (single source of validation); RuleSet
+ * keeps a malformed row's position so it fails closed only for rows it could
+ * have won.
  */
 export function compileRule(r: RuleRow): CompiledRule | null {
   if (r.direction !== "in" && r.direction !== "out" && r.direction !== "any") return null;
@@ -114,8 +115,10 @@ export function compileRule(r: RuleRow): CompiledRule | null {
   const text = (mode: string | null, pattern: string | null, max: number) => {
     if (mode === null && pattern === null) return undefined;
     if ((mode !== "exact" && mode !== "contains") || typeof pattern !== "string") return null;
+    // Length is checked on the stored text and on the lowercased key: lowercasing
+    // can lengthen a string (U+0130 becomes two code units).
     const key = matchKey(pattern);
-    if (key.length < 1 || key.length > max || (mode === "contains" && key.length < 3)) return null;
+    if (pattern.length > max || key.length < 1 || key.length > max || (mode === "contains" && key.length < 3)) return null;
     return { mode: mode as TextMode, key };
   };
   const counterparty = text(r.counterparty_mode, r.counterparty_pattern, 160);
@@ -222,33 +225,62 @@ export function ruleMatches(rule: CompiledRule, row: EvalRow, text: RowText = ne
   return "match";
 }
 
+/**
+ * A stored rule that failed validation. It keeps its (best-effort) place in
+ * the evaluation order and its account scope, so it can only affect rows it
+ * could have applied to, and only when it would have been evaluated before
+ * the winner.
+ */
+export interface MalformedRule {
+  malformed: true;
+  id: string;
+  accountIdentityId: string | null;
+  priority: number;
+  createdAt: string;
+}
+
+type RuleEntry = CompiledRule | MalformedRule;
+const isMalformed = (r: RuleEntry): r is MalformedRule => "malformed" in r;
+
 /** Immutable, ordered rule snapshot for one request. */
 export class RuleSet {
   readonly rules: CompiledRule[];
-  /** True when at least one stored rule failed validation; rules then categorize nothing (fail closed). */
-  readonly unavailable: boolean;
-  private byIdentity = new Map<string, CompiledRule[]>();
+  /** Ids of enabled stored rules that failed validation. */
+  readonly malformedIds: string[];
+  private ordered: RuleEntry[];
+  private byIdentity = new Map<string, RuleEntry[]>();
 
   constructor(rows: RuleRow[]) {
-    const compiled: CompiledRule[] = [];
-    let bad = false;
+    const entries: RuleEntry[] = [];
     for (const r of rows) {
       if (r.enabled !== 1) continue;
       const c = compileRule(r);
-      if (c === null) bad = true;
-      else compiled.push(c);
+      if (c !== null) {
+        entries.push(c);
+        continue;
+      }
+      // An unreadable priority sorts first: it could have outranked anything.
+      const priority = isInt(r.priority) && r.priority >= 0 && r.priority <= 1000 ? r.priority : Number.MAX_SAFE_INTEGER;
+      entries.push({
+        malformed: true,
+        id: String(r.id),
+        accountIdentityId: typeof r.account_identity_id === "string" ? r.account_identity_id : null,
+        priority,
+        createdAt: typeof r.created_at === "string" ? r.created_at : "",
+      });
     }
-    compiled.sort(compareRules);
-    this.rules = compiled;
-    this.unavailable = bad;
+    entries.sort(compareRules);
+    this.ordered = entries;
+    this.rules = entries.filter((e): e is CompiledRule => !isMalformed(e));
+    this.malformedIds = entries.filter(isMalformed).map((e) => e.id);
   }
 
   /** Global rules plus the rules scoped to this identity, already in evaluation order. */
-  candidates(identityId: string | null): CompiledRule[] {
+  candidates(identityId: string | null): RuleEntry[] {
     const key = identityId ?? "";
     let list = this.byIdentity.get(key);
     if (!list) {
-      list = this.rules.filter((r) => r.accountIdentityId === null || r.accountIdentityId === identityId);
+      list = this.ordered.filter((r) => r.accountIdentityId === null || r.accountIdentityId === identityId);
       this.byIdentity.set(key, list);
     }
     return list;
@@ -294,13 +326,19 @@ export function evaluate(row: EvalRow, rules: RuleSet, override: OverrideRow | n
       category_override_revision: override.revision,
     };
   }
-  if (rules.unavailable) return { ...UNCATEGORIZED, category_warning: "rules_unavailable" };
-
   const text = new RowText(row);
   let winner: CompiledRule | null = null;
   let tooLong = false;
   let uncertain = false;
   for (const rule of rules.candidates(row.account_identity_id)) {
+    if (isMalformed(rule)) {
+      // Fail closed only where it matters: a malformed rule ranked before any
+      // match might have been the winner, so this row is left uncategorized.
+      // Rows already won by a higher-ranked rule, and rows outside the
+      // malformed rule's account scope, are unaffected.
+      if (winner === null) return { ...UNCATEGORIZED, category_warning: "rules_unavailable" };
+      continue;
+    }
     const m = ruleMatches(rule, row, text);
     if (m === "too_long") {
       tooLong = true;

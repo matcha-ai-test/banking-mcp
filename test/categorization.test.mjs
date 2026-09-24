@@ -240,23 +240,36 @@ test("uncertainty: flagged when rules of different categories match or the winne
   assert.equal("category_uncertain" in evaluate(row(), new RuleSet([a, b]), override()), false);
 });
 
-test("malformed stored rules fail closed for the whole snapshot; overrides still apply", () => {
-  const good = rule(cp("grocery"));
-  for (const bad of [
+test("a malformed stored rule fails closed only for rows it could have won; overrides still apply", () => {
+  const malformed = [
     { direction: "sideways" },
-    { priority: 5000 },
     { counterparty_mode: "regex", counterparty_pattern: ".*" },
     { counterparty_mode: "contains", counterparty_pattern: "ab" },
     { amount_min_cents: 10 }, // amount without currency
     { amount_min_cents: 10, amount_max_cents: 5, currency: "SEK" },
     { booking_day_from: 10, booking_day_to: null },
     { counterparty_mode: null, counterparty_pattern: null }, // global catch-all
-  ]) {
-    const set = new RuleSet([good, rule({ ...cp("zzzz"), ...bad })]);
-    assert.equal(set.unavailable, true, JSON.stringify(bad));
-    const out = evaluate(row(), set, null);
-    assert.equal(out.category, null);
-    assert.equal(out.category_warning, "rules_unavailable");
-    assert.equal(evaluate(row(), set, override()).category_source, "manual");
+    { counterparty_mode: "exact", counterparty_pattern: "İ".repeat(81) }, // key longer than 160 after lowercasing
+  ];
+  for (const bad of malformed) {
+    const label = JSON.stringify(bad);
+    const good = rule({ ...cp("grocery"), category_id: "good", priority: 100 });
+    // Ranked above the good rule: the malformed rule might have won, so fail closed.
+    const above = new RuleSet([good, rule({ ...cp("zzzz"), priority: 500, ...bad })]);
+    assert.equal(above.malformedIds.length, 1, label);
+    const out = evaluate(row(), above, null);
+    assert.equal(out.category, null, label);
+    assert.equal(out.category_rule_id, null, label);
+    assert.equal(out.category_warning, "rules_unavailable", label);
+    assert.equal(evaluate(row(), above, override()).category_source, "manual", label);
+    // Ranked below the winner: it cannot change the outcome, so the good rule applies.
+    const below = new RuleSet([good, rule({ ...cp("zzzz"), priority: 10, ...bad })]);
+    assert.equal(evaluate(row(), below, null).category_id, "good", label);
+    // Scoped to another account: rows elsewhere are unaffected.
+    const elsewhere = new RuleSet([good, rule({ ...cp("zzzz"), priority: 500, account_identity_id: "c".repeat(32), ...bad })]);
+    assert.equal(evaluate(row(), elsewhere, null).category_id, "good", label);
   }
+  // An unreadable priority sorts first: it could have outranked anything.
+  const topBad = new RuleSet([rule({ ...cp("grocery"), priority: 1000 }), rule({ ...cp("zzzz"), priority: 5000 })]);
+  assert.equal(evaluate(row(), topBad, null).category_warning, "rules_unavailable");
 });

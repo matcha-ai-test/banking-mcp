@@ -279,10 +279,13 @@ test("list_rules: evaluation order, rank, account filter includes global rules, 
   assert.deepEqual(mine.rules.map((r) => r.rule_id), [uuid(2), uuid(4), uuid(1)]);
   const enabledOnly = await call(db, "list_rules", { enabled: true, limit: 2 });
   assert.deepEqual(enabledOnly.rules.map((r) => r.rule_id), [uuid(2), uuid(3)]);
-  assert.equal(enabledOnly.next_after_id, uuid(3));
-  const page2 = await call(db, "list_rules", { enabled: true, limit: 2, after_id: enabledOnly.next_after_id });
+  assert.equal(typeof enabledOnly.next_cursor, "string");
+  // The cursor is a position, not an id: deleting the page's last rule does not break the next page.
+  await cat.deleteRule(db, { rule_id: uuid(3), expected_revision: 1 });
+  const page2 = await call(db, "list_rules", { enabled: true, limit: 2, cursor: enabledOnly.next_cursor });
   assert.deepEqual(page2.rules.map((r) => r.rule_id), [uuid(1)]);
-  assert.equal(page2.next_after_id, null);
+  assert.equal(page2.next_cursor, null);
+  assert.deepEqual(await call(db, "list_rules", { cursor: "not a cursor" }), { error: "invalid_argument", field: "cursor", reason: "invalid" });
   // Output never carries the full IBAN or registry internals.
   const text = JSON.stringify(all);
   assert.equal(text.includes("SE7280000810340009783242"), false);
@@ -459,7 +462,7 @@ test("pending rows get provisional rule categories and no writable key", async (
   await db.replacePending("acc1", [{ ...tx("acc1"), booking_date: "2030-02-01", counterparty: "Example Grocery" }]);
   const out = await transactions(db);
   assert.deepEqual(out.pending[0], {
-    account: "Everyday", booking_date: "2030-02-01", amount: -123.45, currency: "SEK", counterparty: "Example Grocery",
+    account: "Everyday", booking_date: "2030-02-01", amount: -123.45, amount_cents: -12345, currency: "SEK", counterparty: "Example Grocery",
     description: "Card purchase", status: "PENDING", account_ref: ref, category: "Food", category_id: food,
     category_source: "rule", category_rule_id: uuid(1), category_provisional: true,
   });
@@ -556,10 +559,20 @@ test("spending_summary group_by category sums per category and currency", async 
   await db.insertTransactionsIgnore([tx("acc1", { counterparty: "Example Grocery Two", amount_cents: 655, dedup_key: "er:g2" })]);
   const out = parse(await handler("spending_summary", deps).call(self(db), { group_by: "category", limit: 24 }));
   assert.deepEqual(out.groups, [
+    // spending_summary output is compactJson'd: the uncategorized group is the one without category_id.
     { category: "(uncategorized)", currency: "SEK", out: 8500, in: 30000, net: 21500, count: 2 },
-    { category: "Food", currency: "SEK", out: 130, in: 0, net: -130, count: 2 },
+    { category: "Food", category_id: food, currency: "SEK", out: 130, in: 0, net: -130, count: 2 },
   ]);
   assert.deepEqual(out.totals, [{ currency: "SEK", out: 8630, in: 30000, net: 21370, count: 4 }]);
+  // A user category literally named "(uncategorized)" stays a separate group.
+  const trap = await newCategory(db, "(uncategorized)");
+  await cat.addRule(db, { rule_id: uuid(2), rule: { category_id: trap, scope: { type: "all_accounts" }, direction: "in", counterparty: { mode: "exact", value: "Employer AB" } } });
+  const split = parse(await handler("spending_summary", deps).call(self(db), { group_by: "category", limit: 24 }));
+  assert.deepEqual(split.groups.map((g) => [g.category, g.category_id, g.count]), [
+    ["(uncategorized)", undefined, 1],
+    ["Food", food, 2],
+    ["(uncategorized)", trap, 1],
+  ]);
   // Existing groupings are untouched.
   const byMonth = parse(await handler("spending_summary", deps).call(self(db), { group_by: "month", limit: 24 }));
   assert.equal(byMonth.groups[0].month, "2030-01");
@@ -598,7 +611,209 @@ test("bounded cost: 500 rows and 500 rules categorize with a fixed, small number
   env.DB.prepare = prepare;
   assert.equal(out.booked.length, 500);
   assert.ok(out.booked.every((r) => r.category_source === "uncategorized"));
-  // accounts, booked, pending, rules, identities (1 chunk), overrides (13 chunks of 40), warnings
-  assert.ok(queries <= 20, `queries: ${queries}`);
+  // accounts, booked, pending, rules, identities, one override probe (nobody has categorized anything)
+  assert.ok(queries <= 8, `queries: ${queries}`);
   assert.ok(elapsed < 5000, `elapsed ${elapsed}ms`);
+});
+
+test("bounded cost with overrides present: chunked lookups stay bounded", async (t) => {
+  const { env, db, ref } = await seedBasic(t);
+  const food = await newCategory(db, "Food");
+  const rows = [];
+  for (let i = 0; i < 497; i++) rows.push(tx("acc1", { dedup_key: `er:bulk-${i}` }));
+  await db.insertTransactionsIgnore(rows);
+  const row = byCounterparty(await transactions(db), "Example Grocery");
+  await cat.categorizeTransaction(db, { account_ref: ref, transaction_key: row.transaction_key,
+    expected: { booking_date: row.booking_date, amount_cents: row.amount_cents, currency: "SEK" }, category_id: food, expected_revision: 0 });
+  let queries = 0;
+  const prepare = env.DB.prepare;
+  env.DB.prepare = (sql) => { queries++; return prepare(sql); };
+  const out = await transactions(db, { limit: 500 });
+  env.DB.prepare = prepare;
+  assert.equal(out.booked.filter((r) => r.category_source === "manual").length, 1);
+  assert.ok(queries <= 20, `queries: ${queries}`); // + 13 chunks of 40 pairs
+});
+
+// ---- review fixes ----
+
+test("every rule add_rule accepts compiles on the read path (single source of validation), including lowercasing growth", async (t) => {
+  const { env, db } = await seedBasic(t);
+  const food = await newCategory(db, "Food");
+  const candidates = [
+    "İ".repeat(81), // 81 chars stored, 162 after lowercasing: must be refused
+    "İ".repeat(80), // exactly 160 after lowercasing: allowed
+    "ﷺ".repeat(10), // NFKC expands to 180 chars: refused
+    "ß".repeat(160),
+    "ﬁ".repeat(80), // ligature, NFKC doubles to 160
+    "x".repeat(160),
+    "Grocery",
+    "Ǆ ǅ ǆ",
+    "​​ab", // invisible characters vanish: too short for contains
+    "Ⅻ market",
+  ];
+  let n = 100;
+  const accepted = [];
+  for (const value of candidates) {
+    for (const mode of ["exact", "contains"]) {
+      for (const field of ["counterparty", "remittance"]) {
+        const rule = { category_id: food, scope: { type: "all_accounts" }, direction: "out", [field]: { mode, value } };
+        env.DB.sqlite.exec("DELETE FROM rate_limit"); // this test is about validation, not the write budget
+        const out = await cat.addRule(db, { rule_id: uuid(n++), rule });
+        if (out.created) accepted.push(`${field}:${value}`);
+        else assert.equal(out.error, "invalid_argument", `${field}/${mode}/${value}`);
+      }
+    }
+  }
+  const set = await cat.loadRuleSet(db);
+  assert.deepEqual(set.malformedIds, [], "no accepted rule may fail to compile");
+  assert.ok(accepted.includes(`counterparty:${"İ".repeat(80)}`));
+  assert.ok(!accepted.includes(`counterparty:${"İ".repeat(81)}`)); // 162 > 160 after lowercasing
+  assert.ok(accepted.includes(`remittance:${"İ".repeat(81)}`)); // 162 <= 256
+  assert.ok(!accepted.includes(`counterparty:${"ﷺ".repeat(10)}`));
+  // The 81 x U+0130 case through update_rule is refused too.
+  const upd = await cat.updateRule(db, { rule_id: uuid(100 + 2 * 2 * 2 - 1), expected_revision: 1,
+    rule: { category_id: food, scope: { type: "all_accounts" }, direction: "out", counterparty: { mode: "exact", value: "İ".repeat(81) } } });
+  assert.equal(upd.error, "invalid_argument");
+  // Reads keep working.
+  assert.ok((await transactions(db)).booked.every((r) => r.category_warning !== "rules_unavailable"));
+});
+
+test("compact get_transactions keeps category and category_source only; full rows carry amount_cents for writes", async (t) => {
+  const { db, ref } = await seedBasic(t);
+  const food = await newCategory(db, "Food");
+  await cat.addRule(db, { rule_id: uuid(1), rule: groceryRule(food) });
+  const full = byCounterparty(await transactions(db), "Example Grocery");
+  assert.equal(full.amount_cents, -12345);
+  assert.equal(full.account_ref, ref);
+  // amount_cents can be passed straight to categorize_transaction.
+  const done = await cat.categorizeTransaction(db, { account_ref: full.account_ref, transaction_key: full.transaction_key,
+    expected: { booking_date: full.booking_date, amount_cents: full.amount_cents, currency: full.currency }, category_id: food, expected_revision: 0 });
+  assert.equal(done.revision, 1);
+  const compact = byCounterparty(await transactions(db, { compact: true }), "Example Grocery");
+  assert.deepEqual(compact, {
+    account: "Everyday", booking_date: "2030-01-20", amount: -123.45, amount_cents: -12345, currency: "SEK",
+    counterparty: "Example Grocery", description: "Card purchase", category: "Food", category_source: "manual",
+  });
+});
+
+test("preview_rule samples use the same category key as get_transactions", async (t) => {
+  const { db } = await seedBasic(t);
+  const food = await newCategory(db, "Food");
+  const out = await call(db, "preview_rule", { rule: groceryRule(food) });
+  assert.deepEqual(Object.keys(out.sample[0]).sort(),
+    ["account", "amount_cents", "booking_date", "category", "category_after", "counterparty", "currency", "description", "transaction_key"]);
+  assert.equal(out.sample[0].category, null);
+  assert.equal(out.sample[0].category_after, "Food");
+});
+
+test("each of the 7 mutators honors the shared rate limit and the 16 KiB argument cap, writing nothing", async (t) => {
+  const big = "x".repeat(17_000);
+  const cases = [
+    ["create_category", () => ({ name: "Brand new" }), (a) => ({ ...a, name: big })],
+    ["rename_category", (c) => ({ category_id: c.food, name: "Renamed", expected_revision: 1 }), (a) => ({ ...a, name: big })],
+    ["add_rule", (c) => ({ rule_id: uuid(2), rule: groceryRule(c.food, { priority: 7 }) }), (a) => ({ ...a, rule: { ...a.rule, padding: big } })],
+    ["update_rule", (c) => ({ rule_id: uuid(1), rule: groceryRule(c.food, { priority: 7 }), expected_revision: 1 }), (a) => ({ ...a, rule: { ...a.rule, padding: big } })],
+    ["delete_rule", () => ({ rule_id: uuid(1), expected_revision: 1 }), (a) => ({ ...a, padding: big })],
+    ["categorize_transaction", (c) => ({ account_ref: c.ref, transaction_key: c.rent.transaction_key,
+      expected: { booking_date: c.rent.booking_date, amount_cents: c.rent.amount_cents, currency: "SEK" }, category_id: c.food, expected_revision: 0 }),
+      (a) => ({ ...a, expected: { ...a.expected, padding: big } })],
+    ["clear_transaction_category", (c) => ({ account_ref: c.ref, transaction_key: c.grocery.transaction_key, expected_revision: 1 }), (a) => ({ ...a, padding: big })],
+  ];
+  for (const [name, validArgs, oversize] of cases) {
+    await t.test(name, async (st) => {
+      const { env, db, ref } = await seedBasic(st);
+      const food = await newCategory(db, "Food");
+      await cat.addRule(db, { rule_id: uuid(1), rule: groceryRule(food) });
+      const rows = await transactions(db);
+      const grocery = byCounterparty(rows, "Example Grocery");
+      const rent = byCounterparty(rows, "Example Landlord");
+      await cat.categorizeTransaction(db, { account_ref: ref, transaction_key: grocery.transaction_key,
+        expected: { booking_date: grocery.booking_date, amount_cents: grocery.amount_cents, currency: "SEK" }, category_id: food, expected_revision: 0 });
+      const args = validArgs({ food, ref, grocery, rent });
+
+      const tooBig = await call(db, name, oversize(args));
+      assert.deepEqual(tooBig, { error: "invalid_argument", field: "args", reason: "too_large" });
+
+      // The same valid call succeeds as a dry run, then is refused once the shared budget is spent.
+      assert.equal((await call(db, name, { ...args, dry_run: true })).dry_run, true);
+      while (await db.rateLimitOk("mcp_mutation", 30, 60_000)) { /* spend the remaining budget */ }
+      const before = snapshot(env);
+      assert.deepEqual(await call(db, name, args), { error: "rate_limited" });
+      assert.deepEqual(snapshot(env), before);
+    });
+  }
+});
+
+test("h: fallback dedup keys give stable transaction keys across re-syncs and enrichment; a changed payload is never guessed", async (t) => {
+  const { syncAll } = await import("../src/sync.ts");
+  const env = await createEnv();
+  const bankTx = {
+    transaction_amount: { currency: "SEK", amount: "250.00" }, credit_debit_indicator: "DBIT", status: "BOOK",
+    booking_date: "2030-03-03", value_date: "2030-03-03", remittance_information: ["Invoice 42"], creditor: { name: "Example Plumber" },
+  };
+  let payload = [bankTx];
+  const mock = mockEnableBanking({
+    "GET /accounts/acc/transactions": () => ({ transactions: payload }),
+    "GET /accounts/acc/balances": { balances: [] },
+  });
+  t.after(() => { mock.restore(); env.DB.close(); });
+  const db = new Db(env);
+  await db.insertSession({ id: "s", session_id: "u", psu_type: "personal", valid_until: "2099-01-01T00:00:00Z", aspsp_name: "Bank", aspsp_country: "SE" });
+  const ref = await seedAccount(db, "acc");
+  await syncAll(env, "test");
+  const stored = env.DB.sqlite.prepare("SELECT dedup_key FROM transactions").all();
+  assert.equal(stored.length, 1);
+  assert.match(stored[0].dedup_key, /^h:[0-9a-f]{64}$/);
+
+  const food = await newCategory(db, "Trades");
+  const row = byCounterparty(await transactions(db), "Example Plumber");
+  assert.equal(row.transaction_key, await transactionKey(stored[0].dedup_key));
+  const done = await cat.categorizeTransaction(db, { account_ref: ref, transaction_key: row.transaction_key,
+    expected: { booking_date: row.booking_date, amount_cents: row.amount_cents, currency: "SEK" }, category_id: food, expected_revision: 0 });
+  assert.equal(done.revision, 1);
+
+  // Same payload again: same key, no duplicate row, override still applies.
+  await syncAll(env, "test");
+  assert.equal(env.DB.sqlite.prepare("SELECT COUNT(*) AS n FROM transactions").get().n, 1);
+  // Enrichment rewrites display text but not the stored dedup key.
+  env.DB.sqlite.prepare("UPDATE transactions SET counterparty = 'Enriched Plumber AB'").run();
+  const again = byCounterparty(await transactions(db), "Enriched Plumber AB");
+  assert.equal(again.transaction_key, row.transaction_key);
+  assert.equal(again.category_source, "manual");
+
+  // The bank changes the text: a new fallback key, and the override is not guessed onto it.
+  payload = [{ ...bankTx, remittance_information: ["Invoice 42 corrected"] }];
+  await syncAll(env, "test");
+  const changed = (await transactions(db)).booked.find((r) => r.description === "Invoice 42 corrected");
+  assert.notEqual(changed.transaction_key, row.transaction_key);
+  assert.equal(changed.category_source, "uncategorized");
+});
+
+test("an account without a resolved identity exposes no selectors and cannot be written through another account_ref", async (t) => {
+  const { env, db, ref } = await seedBasic(t);
+  const food = await newCategory(db, "Food");
+  // No IBAN and no hash: no identity. Plus a parked account whose resolution failed closed.
+  await db.upsertAccounts([
+    { account_uid: "noid", session_pk: "s", name: "Card", iban: null, currency: "SEK", psu_type: "personal", product: null, last_synced_at: null },
+    { account_uid: "parked", session_pk: "s", name: "Parked", iban: "SE7280000810340009783242", currency: "SEK", psu_type: "personal", product: null, last_synced_at: null },
+  ]);
+  env.DB.sqlite.prepare("UPDATE accounts SET identity_conflict_key = 'x' WHERE account_uid = 'parked'").run();
+  await db.insertTransactionsIgnore([
+    tx("noid", { booking_date: "2030-02-02", counterparty: "Card Shop", dedup_key: "er:card" }),
+    tx("parked", { booking_date: "2030-02-03", counterparty: "Parked Shop", dedup_key: "er:parked" }),
+  ]);
+  const out = await transactions(db);
+  for (const name of ["Card Shop", "Parked Shop"]) {
+    const r = byCounterparty(out, name);
+    assert.equal(r.account_ref, null, name);
+    assert.equal(r.transaction_key, null, name);
+  }
+  for (const [date, dedup] of [["2030-02-02", "er:card"], ["2030-02-03", "er:parked"]]) {
+    const attempt = await cat.categorizeTransaction(db, { account_ref: ref, transaction_key: await transactionKey(dedup),
+      expected: { booking_date: date, amount_cents: -12345, currency: "SEK" }, category_id: food, expected_revision: 0 });
+    assert.equal(attempt.error, "not_cached", dedup);
+  }
+  assert.equal((await cat.categorizeTransaction(db, { account_ref: "e".repeat(32), transaction_key: await transactionKey("er:card"),
+    expected: { booking_date: "2030-02-02", amount_cents: -12345, currency: "SEK" }, category_id: food, expected_revision: 0 })).error, "not_found");
+  assert.equal(env.DB.sqlite.prepare("SELECT COUNT(*) AS n FROM transaction_category_overrides").get().n, 0);
 });

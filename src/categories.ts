@@ -7,6 +7,7 @@
  */
 import { z } from "zod";
 import {
+  compareRules,
   compileRule,
   evaluate,
   matchKey,
@@ -141,7 +142,11 @@ function cleanPattern(
   if (CONTROL_RE.test(m.value)) return { ok: false, error: err("invalid_argument", `rule.${field}.value`, "control_character") };
   const pattern = normalizeText(m.value);
   const key = matchKey(pattern);
-  if (key.length < 1 || pattern.length > max) return { ok: false, error: err("invalid_argument", `rule.${field}.value`, "length") };
+  // Both the stored text and its lowercased match key must fit: lowercasing can
+  // lengthen a string (U+0130 becomes two code units).
+  if (key.length < 1 || pattern.length > max || key.length > max) {
+    return { ok: false, error: err("invalid_argument", `rule.${field}.value`, "length") };
+  }
   if (m.mode === "contains" && key.length < 3) {
     return { ok: false, error: err("invalid_argument", `rule.${field}.value`, "contains_needs_3_characters") };
   }
@@ -184,10 +189,7 @@ async function normalizeRule(db: Db, input: unknown): Promise<{ ok: true; rule: 
   if (accountIdentityId !== null && !(await db.identityById(accountIdentityId))) {
     return { ok: false, error: err("not_found", "rule.scope.account_ref") };
   }
-  return {
-    ok: true,
-    categoryName: category.name,
-    rule: {
+  const rule: NormalizedRule = {
       category_id: r.category_id,
       account_identity_id: accountIdentityId,
       priority: r.priority ?? 100,
@@ -202,8 +204,12 @@ async function normalizeRule(db: Db, input: unknown): Promise<{ ok: true; rule: 
       currency: r.currency ?? null,
       booking_day_from: r.booking_day?.from ?? null,
       booking_day_to: r.booking_day?.to ?? null,
-    },
   };
+  // Single source of validation: the exact row about to be stored must compile
+  // under the same function the read path uses, or it is refused here.
+  const compiled = compileRule({ ...rule, id: "(validation)", category_name: category.name, revision: 1, created_at: "" });
+  if (compiled === null) return { ok: false, error: err("invalid_argument", "rule", "invalid") };
+  return { ok: true, categoryName: category.name, rule };
 }
 
 // ---- repository: categories ----
@@ -257,6 +263,19 @@ const pairKey = (identity: string, key: string) => `${identity}:${key}`;
 /** Bulk lookup in bounded chunks; never one query per transaction. */
 async function overridesForPairs(db: Db, pairs: Array<[string, string]>): Promise<Map<string, OverrideRow>> {
   const out = new Map<string, OverrideRow>();
+  if (pairs.length === 0) return out;
+  // One cheap probe instead of up to 13 chunked lookups when nobody has categorized anything.
+  const identities = [...new Set(pairs.map((p) => p[0]))];
+  const withOverrides = new Set<string>();
+  for (let i = 0; i < identities.length; i += 90) {
+    const chunk = identities.slice(i, i + 90);
+    const r = await db.database
+      .prepare(`SELECT DISTINCT account_identity_id FROM transaction_category_overrides WHERE account_identity_id IN (${chunk.map(() => "?").join(",")})`)
+      .bind(...chunk)
+      .all<{ account_identity_id: string }>();
+    for (const row of r.results) withOverrides.add(row.account_identity_id);
+  }
+  pairs = pairs.filter((p) => withOverrides.has(p[0]));
   const unique = [...new Map(pairs.map((p) => [pairKey(p[0], p[1]), p])).values()];
   for (let i = 0; i < unique.length; i += OVERRIDE_PAIRS_PER_QUERY) {
     const chunk = unique.slice(i, i + OVERRIDE_PAIRS_PER_QUERY);
@@ -280,6 +299,32 @@ async function overrideFor(db: Db, identityId: string, key: string): Promise<Ove
 }
 
 // ---- read-time annotation ----
+
+/** Only the columns categorization needs; never raw bank payloads. */
+const CATEGORY_ROW_COLUMNS = "id, account_uid, booking_date, amount_cents, currency, credit_debit, counterparty, remittance_info, dedup_key";
+
+/** Booked rows for category work (summary, preview), newest first, same filters as queryTransactions. */
+async function bookedRowsForCategories(
+  db: Db,
+  opts: { accountUids?: string[] | null; dateFrom?: string; dateTo?: string; limit: number }
+): Promise<BookedRow[]> {
+  if (opts.accountUids?.length === 0) return [];
+  const where: string[] = [];
+  const params: unknown[] = [];
+  if (opts.accountUids) {
+    where.push(`account_uid IN (${opts.accountUids.map(() => "?").join(",")})`);
+    params.push(...opts.accountUids);
+  }
+  if (opts.dateFrom) { where.push("booking_date >= ?"); params.push(opts.dateFrom); }
+  if (opts.dateTo) { where.push("booking_date <= ?"); params.push(opts.dateTo); }
+  params.push(opts.limit);
+  const r = await db.database
+    .prepare(`SELECT ${CATEGORY_ROW_COLUMNS} FROM transactions ${where.length ? "WHERE " + where.join(" AND ") : ""}
+      ORDER BY booking_date DESC, id DESC LIMIT ?`)
+    .bind(...params)
+    .all<BookedRow>();
+  return r.results;
+}
 
 interface CachedRow {
   account_uid: string;
@@ -319,6 +364,20 @@ function pendingFields(ref: string | null, r: CategoryResult): PendingCategoryFi
     ...(r.category_uncertain ? { category_uncertain: true as const } : {}),
     ...(r.category_warning ? { category_warning: r.category_warning } : {}),
   };
+}
+
+/**
+ * Category fields for one get_transactions row. compact keeps only what a
+ * reader needs (category, category_source and any flag); the selectors and
+ * provenance ids used for writes stay in the full shape.
+ */
+export function categoryFields(f: BookedCategoryFields | PendingCategoryFields, compact?: boolean): Record<string, unknown> {
+  if (!compact) return { ...f };
+  const out: Record<string, unknown> = { category: f.category, category_source: f.category_source };
+  if (f.category_uncertain) out.category_uncertain = true;
+  if (f.category_warning) out.category_warning = f.category_warning;
+  if ("category_provisional" in f) out.category_provisional = true;
+  return out;
 }
 
 /**
@@ -375,6 +434,15 @@ export async function statementCategorizer(db: Db): Promise<(identityId: string 
   };
 }
 
+export interface CategorySummaryRow {
+  key: string;
+  category_id: string | null;
+  currency: string;
+  out_cents: number;
+  in_cents: number;
+  count: number;
+}
+
 /**
  * spending_summary group_by "category": categories are decided at read time,
  * so booked rows are loaded (bounded) and summed in the Worker, per currency.
@@ -382,31 +450,35 @@ export async function statementCategorizer(db: Db): Promise<(identityId: string 
 export async function summarizeByCategory(
   db: Db,
   opts: { accountUids?: string[] | null; dateFrom?: string; dateTo?: string; limit: number }
-): Promise<{ rows: Array<{ key: string; currency: string; out_cents: number; in_cents: number; count: number }> } | ToolError & { reason: string }> {
+): Promise<{ rows: CategorySummaryRow[] } | ToolError & { reason: string; limit: number; hint: string }> {
   if (opts.accountUids?.length === 0) return { rows: [] };
-  const rows = await db.queryTransactions({
-    table: "transactions",
-    accountUids: opts.accountUids,
-    dateFrom: opts.dateFrom,
-    dateTo: opts.dateTo,
-    limit: MAX_CATEGORY_SUMMARY_ROWS + 1,
-  });
+  const rows = await bookedRowsForCategories(db, { ...opts, limit: MAX_CATEGORY_SUMMARY_ROWS + 1 });
   if (rows.length > MAX_CATEGORY_SUMMARY_ROWS) {
-    return { error: "too_many_candidates", reason: `More than ${MAX_CATEGORY_SUMMARY_ROWS} booked rows; narrow the date range or account.` };
+    // Same unbounded default window as the other groupings; only the row cap differs.
+    return {
+      error: "too_many_candidates",
+      reason: "too_many_rows",
+      limit: MAX_CATEGORY_SUMMARY_ROWS,
+      hint: `group_by category sums at most ${MAX_CATEGORY_SUMMARY_ROWS} booked rows per call. Pass date_from and date_to (for example one month) or an account filter.`,
+    };
   }
   const { booked } = await annotateTransactions(db, rows);
-  const groups = new Map<string, { key: string; currency: string; out_cents: number; in_cents: number; count: number }>();
+  const groups = new Map<string, CategorySummaryRow>();
   rows.forEach((r, i) => {
-    const key = booked[i].category ?? "(uncategorized)";
-    const id = `${key}\u0000${r.currency}`;
-    const g = groups.get(id) ?? { key, currency: r.currency, out_cents: 0, in_cents: 0, count: 0 };
+    // Grouped by category_id, never by name: uncategorized rows can never merge
+    // with a user category that happens to be called "(uncategorized)".
+    const categoryId = booked[i].category_id;
+    const key = categoryId === null ? "(uncategorized)" : booked[i].category ?? "(uncategorized)";
+    const id = `${categoryId ?? ""}\u0000${r.currency}`;
+    const g = groups.get(id) ?? { key, category_id: categoryId, currency: r.currency, out_cents: 0, in_cents: 0, count: 0 };
     if (r.credit_debit === "DBIT") g.out_cents += Math.abs(r.amount_cents);
     else g.in_cents += Math.abs(r.amount_cents);
     g.count++;
     groups.set(id, g);
   });
   const sorted = [...groups.values()].sort(
-    (a, b) => b.out_cents - a.out_cents || b.in_cents - a.in_cents || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0) || (a.currency < b.currency ? -1 : 1)
+    (a, b) => b.out_cents - a.out_cents || b.in_cents - a.in_cents || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0) ||
+      ((a.category_id ?? "") < (b.category_id ?? "") ? -1 : (a.category_id ?? "") > (b.category_id ?? "") ? 1 : 0) || (a.currency < b.currency ? -1 : 1)
   );
   return { rows: sorted.slice(0, opts.limit) };
 }
@@ -564,7 +636,7 @@ async function previewSample(db: Db, rule: NormalizedRule, categoryName: string,
   }
   const rows = accountUids !== null && accountUids.length === 0
     ? []
-    : await db.queryTransactions({ table: "transactions", accountUids, dateFrom: opts.dateFrom, dateTo: opts.dateTo, limit: opts.limit + 1 });
+    : await bookedRowsForCategories(db, { accountUids, dateFrom: opts.dateFrom, dateTo: opts.dateTo, limit: opts.limit + 1 });
   const truncated = rows.length > opts.limit;
   const scanned = rows.slice(0, opts.limit);
   const before = await annotateTransactions(db, scanned, [], current);
@@ -595,7 +667,7 @@ async function previewSample(db: Db, rule: NormalizedRule, categoryName: string,
         counterparty: row.counterparty,
         description: row.remittance_info,
         transaction_key: a.transaction_key,
-        current_category: before.booked[i].category,
+        category: before.booked[i].category,
         category_after: a.category,
       });
     }
@@ -725,7 +797,28 @@ export async function deleteRule(db: Db, args: { rule_id: string; expected_revis
   return (await storedRule(db, args.rule_id)) ? err("revision_conflict") : { rule_id: args.rule_id, deleted: false };
 }
 
-export async function listRules(db: Db, args: { account_ref?: string; category_id?: string; enabled?: boolean; limit?: number; after_id?: string }) {
+/**
+ * Opaque list_rules cursor: the evaluation-order position (priority,
+ * created_at, id) of the last rule on the page, so a page boundary survives
+ * that rule being deleted, disabled or filtered out in between.
+ */
+function encodeRuleCursor(r: { priority: number; created_at: string; id: string }): string {
+  return btoa(JSON.stringify([r.priority, r.created_at, r.id])).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+function decodeRuleCursor(cursor: string): { priority: number; createdAt: string; id: string } | null {
+  try {
+    const v: unknown = JSON.parse(atob(cursor.replaceAll("-", "+").replaceAll("_", "/")));
+    if (!Array.isArray(v) || v.length !== 3) return null;
+    const [priority, createdAt, id] = v;
+    if (!Number.isSafeInteger(priority) || typeof createdAt !== "string" || typeof id !== "string") return null;
+    return { priority, createdAt, id };
+  } catch {
+    return null;
+  }
+}
+
+export async function listRules(db: Db, args: { account_ref?: string; category_id?: string; enabled?: boolean; limit?: number; cursor?: string }) {
   if (!enforceArgBudget(args)) return tooLarge();
   const limit = Math.min(Math.max(args.limit ?? 100, 1), 100);
   const all = await allRules(db);
@@ -735,10 +828,10 @@ export async function listRules(db: Db, args: { account_ref?: string; category_i
       (args.category_id === undefined || r.category_id === args.category_id) &&
       (args.enabled === undefined || (r.enabled === 1) === args.enabled)
   );
-  if (args.after_id !== undefined) {
-    const idx = filtered.findIndex((r) => r.id === args.after_id);
-    if (idx === -1) return err("not_found", "after_id");
-    filtered = filtered.slice(idx + 1);
+  if (args.cursor !== undefined) {
+    const pos = decodeRuleCursor(args.cursor);
+    if (pos === null) return err("invalid_argument", "cursor", "invalid");
+    filtered = filtered.filter((r) => compareRules({ priority: r.priority, createdAt: r.created_at, id: r.id }, pos) > 0);
   }
   const page = filtered.slice(0, limit);
   const accounts = await accountDisplay(db);
@@ -748,7 +841,7 @@ export async function listRules(db: Db, args: { account_ref?: string; category_i
     count: page.length,
     total_rules: all.length,
     limit: MAX_RULES,
-    next_after_id: filtered.length > limit ? page[page.length - 1].id : null,
+    next_cursor: filtered.length > limit ? encodeRuleCursor(page[page.length - 1]) : null,
     note: "Rules are listed in evaluation order: priority high to low, then oldest first. rank is the position among enabled rules; the first matching rule wins unless a manual override exists.",
   };
 }
