@@ -1,6 +1,8 @@
 import type { AuthRequest, OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { Db } from "./db";
+import { grantProps } from "./grant";
 import { esc, pageResponse } from "./pages";
+import { isRealSecret } from "./settings";
 import type { Env } from "./types";
 import { rateLimitKey, secretsMatch } from "./util";
 
@@ -70,7 +72,10 @@ export async function handleAuthorize(request: Request, env: Env & { OAUTH_PROVI
 
   const form = await request.formData();
   const password = form.get("password")?.toString() ?? "";
-  if (!(await secretsMatch(password, env.MCP_SECRET))) {
+  // The route is already closed while unconfigured; refusing a placeholder
+  // here too means a deploy-button seeded "generated-connection-password" can
+  // never approve a grant even if that gate is bypassed.
+  if (!isRealSecret(env.MCP_SECRET) || !(await secretsMatch(password, env.MCP_SECRET))) {
     return consentForm(oauthReq.clientId, oauthReq.redirectUri, true);
   }
 
@@ -79,7 +84,8 @@ export async function handleAuthorize(request: Request, env: Env & { OAUTH_PROVI
     userId: "operator",
     metadata: { approvedAt: new Date().toISOString() },
     scope: oauthReq.scope ?? [],
-    props: { user: "operator" },
+    // Binds the grant to the current connection password; see grant.ts.
+    props: await grantProps(env.MCP_SECRET),
   });
   // Secret-free evidence that the redirect was emitted, so a stuck client can
   // be told apart from a server that never issued the code. The code and the

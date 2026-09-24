@@ -53,6 +53,8 @@ export interface AccountRow {
   /** Stable-identity registry linkage (Step 0); optional so older rows and fixtures stay valid. */
   identification_hash?: string | null;
   account_identity_id?: string | null;
+  /** conflictKeyOf() of the natural identity that last failed closed; see identity.ts. */
+  identity_conflict_key?: string | null;
 }
 
 export interface AccountIdentityRow {

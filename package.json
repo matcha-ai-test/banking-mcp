@@ -33,6 +33,8 @@
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test test/*.test.mjs",
     "tail": "node scripts/run-wrangler.mjs tail",
+    "identity:resolve": "node scripts/identity-resolve.mjs",
+    "oauth:revoke": "node scripts/oauth-revoke.mjs",
     "db:schema": "node scripts/run-wrangler.mjs d1 execute banking-mcp-db --local --file=schema.sql"
   },
   "dependencies": {

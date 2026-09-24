@@ -108,6 +108,25 @@ export async function resolveAccountIdentity(db: Db, n: NaturalIdentity): Promis
   return { ok: false, reason: "transient_error" };
 }
 
+/**
+ * Key of the natural identity a conflict was recorded for. A row whose inputs
+ * (IBAN, hash, currency, PSU type) are unchanged since its last fail-closed
+ * resolution is not retried: the answer cannot change until either the bank
+ * reports different inputs or the operator resolves it. Transient errors are
+ * never recorded and always retry.
+ */
+export async function conflictKeyOf(n: NaturalIdentity): Promise<string> {
+  return (await sha256Hex(JSON.stringify(["identity-conflict-v1", n.iban, n.identificationHash, n.currency, n.psuType]))).slice(0, 32);
+}
+
+async function recordConflict(db: Db, uid: string, n: NaturalIdentity): Promise<void> {
+  try {
+    await db.markIdentityConflict(uid, await conflictKeyOf(n));
+  } catch {
+    // Best effort: an unrecorded conflict is simply retried next cycle.
+  }
+}
+
 export async function assignAccountIdentities(db: Db, accounts: AccountRow[]): Promise<Map<string, IdentityResolution>> {
   const out = new Map<string, IdentityResolution>();
   let assigned = 0;
@@ -125,7 +144,10 @@ export async function assignAccountIdentities(db: Db, accounts: AccountRow[]): P
       const res = await resolveAccountIdentity(db, n);
       if (!res.ok) {
         out.set(row.account_uid, res);
-        if (res.reason === "identity_conflict") conflicts++;
+        if (res.reason === "identity_conflict") {
+          conflicts++;
+          await recordConflict(db, row.account_uid, n);
+        }
         else if (res.reason === "transient_error") errors++;
         else unavailable++;
         continue;
@@ -150,12 +172,21 @@ export async function assignAccountIdentities(db: Db, accounts: AccountRow[]): P
       errors++;
     }
   }
-  console.log("identity assignment", { assigned, conflicts, unavailable, errors });
+  // Nearly every call finds nothing to do; only a run that did something is worth a log line.
+  if (assigned + conflicts + unavailable + errors > 0) {
+    console.log("identity assignment", { assigned, conflicts, unavailable, errors });
+  }
   return out;
 }
 
 export async function backfillAccountIdentities(db: Db): Promise<{ assigned: number; conflicts: number; unavailable: number; errors: number }> {
-  const rows = await db.accountsWithoutIdentity();
+  const pending = await db.accountsWithoutIdentity();
+  const rows: AccountRow[] = [];
+  for (const row of pending) {
+    const n = naturalIdentityOf(row);
+    if (n && row.identity_conflict_key && row.identity_conflict_key === (await conflictKeyOf(n))) continue;
+    rows.push(row);
+  }
   const results = await assignAccountIdentities(db, rows);
   let assigned = 0;
   let conflicts = 0;
