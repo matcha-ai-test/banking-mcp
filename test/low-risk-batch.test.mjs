@@ -16,6 +16,7 @@ const { syncAll, backfillAccounts, BACKFILL_LADDER } = await import("../src/sync
 const { accountMetadata } = await import("../src/auth.ts");
 const { aspspRows, refreshAspspCache, ASPSP_CACHE_TTL_MS } = await import("../src/aspsps.ts");
 const { compactJson, serializeMcpText, AUTH_LINK_CMD } = await import("../src/mcp-output.ts");
+const { signedAmountCents } = await import("../src/util.ts");
 
 const session = { id: "local", session_id: "upstream", psu_type: "personal", aspsp_name: "Example Bank", aspsp_country: "SE", valid_until: "2099-01-01T00:00:00Z" };
 const account = { account_uid: "account", session_pk: "local", name: "Primary", iban: "SE1234567890", currency: "SEK", psu_type: "personal", product: null, last_synced_at: null };
@@ -203,8 +204,11 @@ test("compactJson drops null, empty and undefined but keeps zero and false; get_
   const { db } = await setup(t);
   await seedTransactions(db);
   const source = readFileSync(new URL("../src/mcp.ts", import.meta.url), "utf8");
-  const signed = Function(`${stripTypeScriptTypes(source.slice(source.indexOf("function money("), source.indexOf("export class BankingMCP")))}; return signed;`)();
-  const run = async (input) => parse(await handler("get_transactions", { ...deps, signed, annotateTransactions, categoryFields }).call(self(db), { limit: 100, include_pending: true, ...input }));
+  const signed = Function(
+    "signedAmountCents",
+    `${stripTypeScriptTypes(source.slice(source.indexOf("function money("), source.indexOf("export class BankingMCP")))}; return signed;`
+  )(signedAmountCents);
+  const run = async (input) => parse(await handler("get_transactions", { ...deps, signed, signedAmountCents, annotateTransactions, categoryFields }).call(self(db), { limit: 100, include_pending: true, ...input }));
   const full = await run({});
   const compact = await run({ compact: true });
   assert.equal("description" in full.booked[0], true);

@@ -7,6 +7,7 @@ import { createEnv, mockEnableBanking } from "./helpers.mjs";
 const { Db } = await import("../src/db.ts");
 const { readAuthStatus } = await import("../src/auth-status.ts");
 import { buildAuthStatus, serializeMcpText, AUTH_LINK_CMD, REFRESH_BUDGET_PER_DAY } from "../src/mcp-output.ts";
+import { signedAmountCents } from "../src/util.ts";
 
 const NOW = Date.parse("2030-01-01T12:00:00Z");
 const session = {
@@ -144,7 +145,8 @@ test("get_transactions with omitted params matches the hand-written pre-change o
   const input = z.object(inputSchema).parse({});
   assert.deepEqual(input, { limit: 100, include_pending: true });
   const moneyFunctions = source.slice(source.indexOf("function money("), source.indexOf("export class BankingMCP"));
-  dependencies.signed = Function(`${stripTypeScriptTypes(moneyFunctions)}; return signed;`)();
+  dependencies.signed = Function("signedAmountCents", `${stripTypeScriptTypes(moneyFunctions)}; return signed;`)(signedAmountCents);
+  dependencies.signedAmountCents = signedAmountCents;
   ({ annotateTransactions: dependencies.annotateTransactions, categoryFields: dependencies.categoryFields } = await import("../src/categories.ts"));
   assertOutput(await handler("get_transactions", dependencies).call(self, input), transactionsFixture);
   assert.equal(mock.calls.length, 0);

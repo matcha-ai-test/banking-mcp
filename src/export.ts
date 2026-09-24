@@ -1,7 +1,7 @@
 import { statementCategorizer, type BookedCategoryFields } from "./categories";
 import { Db } from "./db";
 import type { Env } from "./types";
-import { maskIban } from "./util";
+import { maskIban, signedAmountCents } from "./util";
 
 /** Output fields stay a fixed allowlist; the extra columns feed the category evaluator only. */
 interface ExportTxRow {
@@ -110,7 +110,7 @@ export async function buildStatementExport(
     let running = bal?.amount_cents ?? null;
     const rows: StatementAccount["transactions"] = [];
     for (const t of txs.results) {
-      const signed = t.credit_debit === "DBIT" ? -t.amount_cents : t.amount_cents;
+      const signed = signedAmountCents(t.amount_cents, t.credit_debit);
       const balance = running;
       if (running !== null) running -= signed;
       const { account_ref: _ref, ...category } = await categorize(t);

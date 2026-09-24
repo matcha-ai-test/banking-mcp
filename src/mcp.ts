@@ -40,7 +40,7 @@ import {
 } from "./mcp-output";
 import { previewEnrichmentCandidates, syncAll } from "./sync";
 import type { Env } from "./types";
-import { ACCOUNT_REF_RE, containsIbanLike, maskIban, matchAccountUids, normalizeText } from "./util";
+import { ACCOUNT_REF_RE, containsIbanLike, maskIban, matchAccountUids, normalizeText, signedAmountCents } from "./util";
 import { canonicalIban } from "./identity";
 
 /** Guides clients through cached reads, budgeted refreshes, and operator-controlled renewal. */
@@ -63,7 +63,7 @@ function money(cents: number): number {
 }
 
 function signed(cents: number, creditDebit: string): number {
-  return money(creditDebit === "DBIT" ? -Math.abs(cents) : Math.abs(cents));
+  return money(signedAmountCents(cents, creditDebit));
 }
 
 export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<string, never>> {
@@ -317,7 +317,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
           booking_date: r.booking_date,
           amount: signed(r.amount_cents, r.credit_debit),
           // Signed integer cents: pass straight to categorize_transaction's expected.amount_cents.
-          amount_cents: r.credit_debit === "DBIT" ? -Math.abs(r.amount_cents) : Math.abs(r.amount_cents),
+          amount_cents: signedAmountCents(r.amount_cents, r.credit_debit),
           currency: r.currency,
           counterparty: r.counterparty,
           description: r.remittance_info,
@@ -376,8 +376,11 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
           totals: [...totals.values()].sort((a, b) => b.out - a.out || b.in - a.in)
             .map((t) => ({ currency: t.currency, out: money(t.out), in: money(t.in), net: money(t.in - t.out), count: t.count })),
           groups: rows.map((r) => ({
-            [group_by]: group_by === "account" ? nameOf(r.key) : r.key,
+            [group_by]: group_by === "account" ? nameOf(r.key as string) : r.key,
             ...("category_id" in r ? { category_id: r.category_id } : {}),
+            // Truly-uncategorized rows (no category_id) get this flag instead of relying on
+            // the "(uncategorized)" label text, which a user category could also be named.
+            ...("uncategorized" in r && r.uncategorized ? { uncategorized: true } : {}),
             currency: r.currency,
             out: money(r.out_cents),
             in: money(r.in_cents),

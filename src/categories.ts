@@ -435,8 +435,11 @@ export async function statementCategorizer(db: Db): Promise<(identityId: string 
 }
 
 export interface CategorySummaryRow {
-  key: string;
+  /** null only for the truly-uncategorized group; see `uncategorized`. */
+  key: string | null;
   category_id: string | null;
+  /** True only for the truly-uncategorized group, never for a user category named "(uncategorized)". */
+  uncategorized: boolean;
   currency: string;
   out_cents: number;
   in_cents: number;
@@ -466,18 +469,22 @@ export async function summarizeByCategory(
   const groups = new Map<string, CategorySummaryRow>();
   rows.forEach((r, i) => {
     // Grouped by category_id, never by name: uncategorized rows can never merge
-    // with a user category that happens to be called "(uncategorized)".
+    // with a user category that happens to be called "(uncategorized)". The
+    // truly-uncategorized group's key is null (not the string "(uncategorized)")
+    // so it can never collide with a user category of that same name; callers
+    // must key off `uncategorized`, not the label text.
     const categoryId = booked[i].category_id;
-    const key = categoryId === null ? "(uncategorized)" : booked[i].category ?? "(uncategorized)";
+    const uncategorized = categoryId === null;
+    const key = uncategorized ? null : booked[i].category ?? "(uncategorized)";
     const id = `${categoryId ?? ""}\u0000${r.currency}`;
-    const g = groups.get(id) ?? { key, category_id: categoryId, currency: r.currency, out_cents: 0, in_cents: 0, count: 0 };
+    const g = groups.get(id) ?? { key, category_id: categoryId, uncategorized, currency: r.currency, out_cents: 0, in_cents: 0, count: 0 };
     if (r.credit_debit === "DBIT") g.out_cents += Math.abs(r.amount_cents);
     else g.in_cents += Math.abs(r.amount_cents);
     g.count++;
     groups.set(id, g);
   });
   const sorted = [...groups.values()].sort(
-    (a, b) => b.out_cents - a.out_cents || b.in_cents - a.in_cents || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0) ||
+    (a, b) => b.out_cents - a.out_cents || b.in_cents - a.in_cents || ((a.key ?? "") < (b.key ?? "") ? -1 : (a.key ?? "") > (b.key ?? "") ? 1 : 0) ||
       ((a.category_id ?? "") < (b.category_id ?? "") ? -1 : (a.category_id ?? "") > (b.category_id ?? "") ? 1 : 0) || (a.currency < b.currency ? -1 : 1)
   );
   return { rows: sorted.slice(0, opts.limit) };

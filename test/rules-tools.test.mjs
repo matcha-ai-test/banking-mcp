@@ -12,6 +12,7 @@ const { Db } = await import("../src/db.ts");
 const { assignAccountIdentities, transactionKey } = await import("../src/identity.ts");
 const { compactJson, serializeMcpText } = await import("../src/mcp-output.ts");
 const { buildStatementExport } = await import("../src/export.ts");
+const { signedAmountCents } = await import("../src/util.ts");
 const cat = await import("../src/categories.ts");
 
 const IBAN = "SE4550000000058398257466";
@@ -28,7 +29,7 @@ function handler(name, dependencies) {
   const money = source.slice(source.indexOf("function money("), source.indexOf("export class BankingMCP"));
   return Function(...Object.keys(dependencies), `${stripTypeScriptTypes(money)}; return ${stripTypeScriptTypes(`(${body})`)};`)(...Object.values(dependencies));
 }
-const deps = { compactJson, ...cat };
+const deps = { compactJson, signedAmountCents, ...cat };
 const self = (db, uids = null) => ({ db: () => db, resolveAccountUids: async () => uids, warnings: async () => "", text: serializeMcpText });
 const parse = (r) => JSON.parse(r.content[0].text);
 const call = async (db, name, args) => parse(await handler(name, deps).call(self(db), args));
@@ -93,7 +94,10 @@ const groceryRule = (category_id, extra = {}) => ({
 
 async function transactions(db, input = {}) {
   const source = readFileSync(new URL("../src/mcp.ts", import.meta.url), "utf8");
-  const signed = Function(`${stripTypeScriptTypes(source.slice(source.indexOf("function money("), source.indexOf("export class BankingMCP")))}; return signed;`)();
+  const signed = Function(
+    "signedAmountCents",
+    `${stripTypeScriptTypes(source.slice(source.indexOf("function money("), source.indexOf("export class BankingMCP")))}; return signed;`
+  )(signedAmountCents);
   return parse(await handler("get_transactions", { ...deps, signed }).call(self(db), { limit: 100, include_pending: true, ...input }));
 }
 const byCounterparty = (out, name) => out.booked.find((r) => r.counterparty === name);
@@ -552,6 +556,23 @@ test("get_transactions and export_statements agree on categories; export keeps b
   }
 });
 
+test("export_statements and get_transactions agree on sign even when a DBIT row is stored with a negative amount_cents", async (t) => {
+  const { env, db } = await seedBasic(t);
+  // Some banks report DBIT amounts already negative instead of the usual unsigned magnitude.
+  await db.insertTransactionsIgnore([
+    tx("acc1", { booking_date: "2030-01-27", amount_cents: -500, credit_debit: "DBIT", dedup_key: "er:neg-dbit" }),
+  ]);
+  const live = await transactions(db);
+  const row = live.booked.find((r) => r.booking_date === "2030-01-27");
+  assert.equal(row.amount_cents, -500);
+  assert.equal(row.amount, -5);
+
+  const data = await buildStatementExport(env, { since: "2030-01-01" });
+  const exportRow = data.accounts[0].transactions.find((r) => r.booking_date === "2030-01-27");
+  assert.equal(exportRow.amount_cents, -500, "export must not double-negate an already-negative DBIT amount_cents");
+  assert.equal(exportRow.amount_cents, row.amount_cents);
+});
+
 test("spending_summary group_by category sums per category and currency", async (t) => {
   const { db } = await seedBasic(t);
   const food = await newCategory(db, "Food");
@@ -559,19 +580,22 @@ test("spending_summary group_by category sums per category and currency", async 
   await db.insertTransactionsIgnore([tx("acc1", { counterparty: "Example Grocery Two", amount_cents: 655, dedup_key: "er:g2" })]);
   const out = parse(await handler("spending_summary", deps).call(self(db), { group_by: "category", limit: 24 }));
   assert.deepEqual(out.groups, [
-    // spending_summary output is compactJson'd: the uncategorized group is the one without category_id.
-    { category: "(uncategorized)", currency: "SEK", out: 8500, in: 30000, net: 21500, count: 2 },
+    // spending_summary output is compactJson'd: the truly-uncategorized group has no
+    // "category" key (its key is null) and carries uncategorized:true instead, so it can
+    // never be confused with a user category literally named "(uncategorized)".
+    { uncategorized: true, currency: "SEK", out: 8500, in: 30000, net: 21500, count: 2 },
     { category: "Food", category_id: food, currency: "SEK", out: 130, in: 0, net: -130, count: 2 },
   ]);
   assert.deepEqual(out.totals, [{ currency: "SEK", out: 8630, in: 30000, net: 21370, count: 4 }]);
-  // A user category literally named "(uncategorized)" stays a separate group.
+  // A user category literally named "(uncategorized)" stays a separate group and never
+  // carries the uncategorized flag.
   const trap = await newCategory(db, "(uncategorized)");
   await cat.addRule(db, { rule_id: uuid(2), rule: { category_id: trap, scope: { type: "all_accounts" }, direction: "in", counterparty: { mode: "exact", value: "Employer AB" } } });
   const split = parse(await handler("spending_summary", deps).call(self(db), { group_by: "category", limit: 24 }));
-  assert.deepEqual(split.groups.map((g) => [g.category, g.category_id, g.count]), [
-    ["(uncategorized)", undefined, 1],
-    ["Food", food, 2],
-    ["(uncategorized)", trap, 1],
+  assert.deepEqual(split.groups.map((g) => [g.category ?? null, g.category_id ?? null, g.uncategorized ?? false, g.count]), [
+    [null, null, true, 1],
+    ["Food", food, false, 2],
+    ["(uncategorized)", trap, false, 1],
   ]);
   // Existing groupings are untouched.
   const byMonth = parse(await handler("spending_summary", deps).call(self(db), { group_by: "month", limit: 24 }));
