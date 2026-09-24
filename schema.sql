@@ -146,3 +146,75 @@ CREATE TABLE IF NOT EXISTS account_labels (
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_account_labels_norm ON account_labels(label_norm);
+
+-- Step 2: local categories, rules and manual overrides. Evaluated at read time;
+-- no table references transactions or accounts rows, so re-authorization,
+-- folding and pending replacement never delete a user decision.
+CREATE TABLE IF NOT EXISTS categories (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 80),
+  name_key TEXT NOT NULL UNIQUE CHECK (length(name_key) BETWEEN 1 AND 160),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS categorization_rules (
+  id TEXT PRIMARY KEY,
+  category_id TEXT NOT NULL REFERENCES categories(id) ON DELETE RESTRICT,
+  account_identity_id TEXT REFERENCES account_identities(id) ON DELETE RESTRICT,
+  priority INTEGER NOT NULL DEFAULT 100 CHECK (priority BETWEEN 0 AND 1000),
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
+  direction TEXT NOT NULL CHECK (direction IN ('in','out','any')),
+  counterparty_mode TEXT CHECK (counterparty_mode IN ('exact','contains')),
+  counterparty_pattern TEXT,
+  remittance_mode TEXT CHECK (remittance_mode IN ('exact','contains')),
+  remittance_pattern TEXT,
+  amount_min_cents INTEGER,
+  amount_max_cents INTEGER,
+  currency TEXT,
+  booking_day_from INTEGER,
+  booking_day_to INTEGER,
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  CHECK ((counterparty_mode IS NULL AND counterparty_pattern IS NULL) OR
+    (counterparty_mode IS NOT NULL AND counterparty_pattern IS NOT NULL
+      AND length(counterparty_pattern) BETWEEN 1 AND 160)),
+  CHECK ((remittance_mode IS NULL AND remittance_pattern IS NULL) OR
+    (remittance_mode IS NOT NULL AND remittance_pattern IS NOT NULL
+      AND length(remittance_pattern) BETWEEN 1 AND 256)),
+  CHECK (amount_min_cents IS NULL OR
+    (typeof(amount_min_cents) = 'integer' AND amount_min_cents BETWEEN 0 AND 9007199254740991)),
+  CHECK (amount_max_cents IS NULL OR
+    (typeof(amount_max_cents) = 'integer' AND amount_max_cents BETWEEN 0 AND 9007199254740991)),
+  CHECK (amount_min_cents IS NULL OR amount_max_cents IS NULL OR amount_min_cents <= amount_max_cents),
+  CHECK (currency IS NULL OR (length(currency) = 3 AND currency NOT GLOB '*[^A-Z]*')),
+  CHECK ((amount_min_cents IS NULL AND amount_max_cents IS NULL) OR currency IS NOT NULL),
+  CHECK ((booking_day_from IS NULL AND booking_day_to IS NULL) OR
+    (booking_day_from IS NOT NULL AND booking_day_to IS NOT NULL
+      AND booking_day_from BETWEEN 1 AND 31 AND booking_day_to BETWEEN 1 AND 31
+      AND booking_day_from <= booking_day_to)),
+  CHECK (account_identity_id IS NOT NULL OR counterparty_pattern IS NOT NULL OR
+    remittance_pattern IS NOT NULL OR amount_min_cents IS NOT NULL OR amount_max_cents IS NOT NULL)
+);
+CREATE INDEX IF NOT EXISTS idx_rules_scope_priority
+  ON categorization_rules(enabled, account_identity_id, priority DESC, created_at, id);
+CREATE INDEX IF NOT EXISTS idx_rules_category ON categorization_rules(category_id);
+
+CREATE TABLE IF NOT EXISTS transaction_category_overrides (
+  account_identity_id TEXT NOT NULL REFERENCES account_identities(id) ON DELETE RESTRICT,
+  transaction_key TEXT NOT NULL CHECK (
+    length(transaction_key) = 64 AND transaction_key NOT GLOB '*[^0-9a-f]*'),
+  category_id TEXT REFERENCES categories(id) ON DELETE RESTRICT,
+  booking_date TEXT NOT NULL CHECK (length(booking_date) = 10),
+  amount_cents INTEGER NOT NULL CHECK (
+    typeof(amount_cents) = 'integer' AND amount_cents BETWEEN 0 AND 9007199254740991),
+  currency TEXT NOT NULL CHECK (length(currency) = 3 AND currency NOT GLOB '*[^A-Z]*'),
+  credit_debit TEXT NOT NULL CHECK (credit_debit IN ('CRDT','DBIT')),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (account_identity_id, transaction_key)
+);
+CREATE INDEX IF NOT EXISTS idx_overrides_category ON transaction_category_overrides(category_id);

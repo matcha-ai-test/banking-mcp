@@ -1,16 +1,25 @@
+import { statementCategorizer, type BookedCategoryFields } from "./categories";
+import { Db } from "./db";
 import type { Env } from "./types";
 import { maskIban } from "./util";
 
+/** Output fields stay a fixed allowlist; the extra columns feed the category evaluator only. */
 interface ExportTxRow {
+  account_uid: string;
   booking_date: string;
   value_date: string | null;
   amount_cents: number;
+  currency: string;
   credit_debit: string;
+  counterparty: string | null;
   remittance_info: string | null;
+  dedup_key: string;
 }
 
 export interface StatementAccount {
   account_uid: string;
+  /** Stable account reference (null when the bank supplied no IBAN or identification hash). */
+  account_ref: string | null;
   bank: string;
   name: string | null;
   iban: string | null;
@@ -20,13 +29,13 @@ export interface StatementAccount {
   balance_type: string | null;
   balance_cents: number | null;
   balance_fetched_at: string | null;
-  transactions: {
+  transactions: ({
     booking_date: string;
     value_date: string | null;
     text: string;
     amount_cents: number;
     balance_cents: number | null;
-  }[];
+  } & Omit<BookedCategoryFields, "account_ref">)[];
 }
 
 /**
@@ -57,7 +66,7 @@ export async function buildStatementExport(
 
   const accounts = await env.DB.prepare(
     `SELECT a.account_uid, a.name, a.iban, a.currency, a.psu_type, a.last_synced_at,
-            s.aspsp_name AS bank
+            a.account_identity_id, s.aspsp_name AS bank
        FROM accounts a JOIN eb_sessions s ON s.id = a.session_pk
       ${where.length ? "WHERE " + where.join(" AND ") : ""}
       ORDER BY a.iban`
@@ -70,8 +79,12 @@ export async function buildStatementExport(
       currency: string | null;
       psu_type: string;
       last_synced_at: string | null;
+      account_identity_id: string | null;
       bank: string;
     }>();
+
+  // One rule snapshot for the whole export; overrides are loaded once per account identity.
+  const categorizerFor = await statementCategorizer(new Db(env));
 
   const out: StatementAccount[] = [];
   for (const acct of accounts.results) {
@@ -85,7 +98,7 @@ export async function buildStatementExport(
       .first<{ balance_type: string; amount_cents: number; fetched_at: string }>();
 
     const txs = await env.DB.prepare(
-      `SELECT booking_date, value_date, amount_cents, credit_debit, remittance_info
+      `SELECT account_uid, booking_date, value_date, amount_cents, currency, credit_debit, counterparty, remittance_info, dedup_key
          FROM transactions
         WHERE account_uid = ? AND booking_date >= ?
         ORDER BY booking_date DESC, id DESC`
@@ -93,22 +106,27 @@ export async function buildStatementExport(
       .bind(acct.account_uid, since)
       .all<ExportTxRow>();
 
+    const categorize = await categorizerFor(acct.account_identity_id ?? null);
     let running = bal?.amount_cents ?? null;
-    const rows = txs.results.map((t) => {
+    const rows: StatementAccount["transactions"] = [];
+    for (const t of txs.results) {
       const signed = t.credit_debit === "DBIT" ? -t.amount_cents : t.amount_cents;
       const balance = running;
       if (running !== null) running -= signed;
-      return {
+      const { account_ref: _ref, ...category } = await categorize(t);
+      rows.push({
         booking_date: t.booking_date,
         value_date: t.value_date,
         text: t.remittance_info ?? "",
         amount_cents: signed,
         balance_cents: balance,
-      };
-    });
+        ...category,
+      });
+    }
 
     out.push({
       account_uid: acct.account_uid,
+      account_ref: acct.account_identity_id ?? null,
       bank: acct.bank,
       name: acct.name,
       iban: maskIban(acct.iban),

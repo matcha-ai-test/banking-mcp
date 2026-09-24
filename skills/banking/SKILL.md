@@ -30,6 +30,7 @@ On claude.ai/desktop the tools sit under the connector's UUID prefix — use the
 - **Fresh figures right now:** `refresh_now` — see budget below.
 - **Unclear transaction:** `get_transaction_details` before broader merchant research. Cached details are free; an uncached lookup consumes live-request budget.
 - **Session health:** `get_auth_status` for cached status; request `verify: true` when live verification is needed, subject to its cooldown.
+- **Categories:** rows from `get_transactions` / `export_statements` carry `category` and `category_source`; `spending_summary` with `group_by: "category"` totals them. To teach a category, suggest it in prose, run `preview_rule`, and only after the user confirms call `create_category` then `add_rule` (or `categorize_transaction` for a single row, using its `account_ref` and `transaction_key`). All of this is local to the server; nothing is written to the bank.
 
 ## Cache and live requests
 

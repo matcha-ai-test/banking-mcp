@@ -103,11 +103,18 @@ test("verify=true adds all live fields while preserving sync evidence and exclud
 });
 
 // Literal pre-details output, including pending rows and signed amounts.
+// Step 2 deliberately appends the category fields to every row (additive: the
+// earlier keys, their order and values are unchanged). The account has no IBAN
+// or identification hash, so it has no stable account_ref and therefore no
+// writable transaction_key; with no rules it is uncategorized.
+const uncategorized = { category: null, category_id: null, category_source: "uncategorized", category_rule_id: null };
 const transactionsFixture = {
   booked: [{ account: "Primary", booking_date: "2030-01-01", amount: -12.34,
-    currency: "EUR", counterparty: "Example payee", description: "Example purchase" }],
+    currency: "EUR", counterparty: "Example payee", description: "Example purchase",
+    account_ref: null, transaction_key: null, ...uncategorized, category_override_revision: null }],
   pending: [{ account: "Primary", booking_date: "2030-01-02", amount: 5.67,
-    currency: "EUR", counterparty: null, description: "Example refund", status: "PENDING" }],
+    currency: "EUR", counterparty: null, description: "Example refund", status: "PENDING",
+    account_ref: null, ...uncategorized, category_provisional: true }],
   note: "Amounts are signed: negative = money out, positive = money in. Cached data: see last_synced_at via list_accounts.",
 };
 
@@ -138,6 +145,7 @@ test("get_transactions with omitted params matches the hand-written pre-change o
   assert.deepEqual(input, { limit: 100, include_pending: true });
   const moneyFunctions = source.slice(source.indexOf("function money("), source.indexOf("export class BankingMCP"));
   dependencies.signed = Function(`${stripTypeScriptTypes(moneyFunctions)}; return signed;`)();
+  dependencies.annotateTransactions = (await import("../src/categories.ts")).annotateTransactions;
   assertOutput(await handler("get_transactions", dependencies).call(self, input), transactionsFixture);
   assert.equal(mock.calls.length, 0);
   assert.equal((await db.activeSessions())[0].refresh_count_today, 0);
