@@ -263,7 +263,9 @@ for (const [status, body, method] of [[429, "limited", "setSessionBackoff"], [40
     assert.ok(env.DB.sqlite.prepare("SELECT last_synced_at FROM accounts WHERE account_uid = 'account-0-0'").get().last_synced_at);
     assert.equal(env.DB.sqlite.prepare("SELECT amount_cents FROM balances").get().amount_cents, 4200);
     assert.equal(result.errors.length, 2);
-    assert.equal(result.errors[0], "account-0-0: enrichment metadata write failed");
+    // No IBAN on the fixture account, so the generic label; never the account uid.
+    assert.equal(result.errors[0], "account: enrichment metadata write failed");
+    assert.equal(result.errors.join(" ").includes("account-0-0"), false);
     assert.match(result.errors[1], status === 429 ? /rate-limited/ : /expired/);
     assert.equal(JSON.stringify(result).includes("injected private"), false);
   });

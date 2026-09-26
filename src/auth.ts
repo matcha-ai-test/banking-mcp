@@ -10,7 +10,7 @@ import { AUTH_COOKIE_NAME, AUTH_COOKIE_TTL_MS, cookieFrom, maskIban, mintAuthCoo
 
 const MAX_CONSENT_DAYS = 180;
 const AUTH_START_LIMIT_PER_HOUR = 10;
-const STATE_TTL_MINUTES = 15;
+export const STATE_TTL_MINUTES = 15;
 
 function authPage(title: string, body: string, status = 200): Response {
   return pageResponse({ title, body, status });

@@ -178,7 +178,7 @@ There are two ways to authenticate the connector. Both send the same `CONNECTION
 **Option A: Sign in (OAuth, recommended)**
 
 1. Add the `/mcp` URL as a custom connector and set Authentication to **Sign in now**.
-2. Under OAuth client choose **Register automatically** (DCR). The server does not serve a client ID metadata document, so "Use Claude's published identity" does not apply.
+2. Under OAuth client choose **Register automatically** (DCR, recommended) or **Use Claude's published identity**. The server accepts both: it resolves client ID metadata documents (an https URL as `client_id`) as well as dynamic registration. If the published identity fails with "Invalid OAuth request", switch to Register automatically.
 3. Click Add, then Connect. The server opens its approval page in the same tab; enter `CONNECTION_PASSWORD` there and press Approve. Claude then exchanges the code and attaches the connector.
 
 Deployments made before 2026-09-16 blocked this flow in Chrome: the approval page sent a `Content-Security-Policy` with `form-action 'self'`, which Chrome also applies to the redirect that follows the form POST, so the browser dropped the 302 back to claude.ai and Claude restarted the flow indefinitely ([issue #14](https://github.com/matcha-ai-test/banking-mcp/issues/14)). The page now allows the client's redirect origin. If you deployed earlier and see the approval page reappear after Approve, pull and redeploy, or use option B.
@@ -321,7 +321,8 @@ an unconfigured deployment behaves exactly as before.
 - No bank-side write tools, transfers, or payments exist in this server. The only writes are local annotations in the Worker's own D1 database: account labels, categories, rules, and manual categorizations.
 - `/mcp` requires the generated connection password (`MCP_SECRET`), accepted either as `Authorization: Bearer <password>` or in one of the request headers claude.ai allows: `x-api-key`, `api-key`, `apikey`, `x-apikey`, `x-api-token`, `api-token`, or `x-auth-token`.
 - `/auth/start` requires the operator token (`START_TOKEN`), carried in the link fragment and exchanged for a short-lived cookie.
-- `/mcp` answers 429 after 20 wrong connection passwords from one client within 10 minutes. `/authorize` allows 10 attempts per hour. `/authorize`, `/token` and `/register` answer 503 until the deployment is configured.
+- `/mcp` answers 429 after 20 wrong connection passwords from one client within 10 minutes. A bearer token the OAuth provider rejects counts as a wrong password in the same bucket. `/authorize` allows 10 attempts per hour and `/register` 10 client registrations per hour. `/authorize`, `/token` and `/register` answer 503 until the deployment is configured.
+- The nightly cron deletes rate-limit rows older than a day and used or expired bank sign-in states.
 - A Restricted Enable Banking application can access only accounts linked to it.
 - Local secrets are stored in Git-ignored `.dev.vars`; cloud secrets are uploaded as encrypted Cloudflare Worker secrets. With `--both`, the same secrets are also written to the local `.dev.vars`.
 - `.dev.vars`, `.mcp-credentials`, `wrangler.local.jsonc`, `.pem`, and `.key` files are excluded from Git.
@@ -355,6 +356,6 @@ Bug reports, security reports, and pull requests are welcome. See [CONTRIBUTING.
 
 ## License
 
-[AGPL-3.0-or-later](LICENSE) · Copyright © 2026 Leon Curmak.
+[AGPL-3.0-or-later](LICENSE) · Copyright © 2026 Leon.
 
 See the license text for source-distribution and remote-network interaction requirements. For an older version, consult the license included with that commit.

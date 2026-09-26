@@ -2,7 +2,7 @@
   "name": "banking-mcp",
   "description": "Read-mostly access to your linked bank accounts via Enable Banking: balances, transactions, statement export, budgeted live refresh. Ships a usage skill; installation and MCP registration are covered in AGENTS.md.",
   "version": "1.0.0",
-  "author": { "name": "Leon Curmak" },
+  "author": { "name": "Leon" },
   "homepage": "https://github.com/matcha-ai-test/banking-mcp",
   "license": "AGPL-3.0-or-later"
 }

@@ -3,6 +3,15 @@ import { normalizeText } from "./util";
 import { canonicalIban } from "./identity";
 
 /**
+ * A LIKE pattern matching `text` literally anywhere: `%` and `_` in user input
+ * are wildcards otherwise ("100%" would match every row containing "100").
+ * Pair with a backslash ESCAPE clause in the SQL.
+ */
+export function likeContains(text: string): string {
+  return `%${text.replace(/[\\%_]/g, "\\$&")}%`;
+}
+
+/**
  * D1 repository. The database is bound directly to the Worker — it has no
  * public endpoint and no credentials that can leak.
  */
@@ -453,8 +462,8 @@ export class Db {
       params.push(opts.dateTo);
     }
     if (opts.search) {
-      where.push("(counterparty LIKE ? OR remittance_info LIKE ?)");
-      const like = `%${opts.search}%`;
+      where.push("(counterparty LIKE ? ESCAPE '\\' OR remittance_info LIKE ? ESCAPE '\\')");
+      const like = likeContains(opts.search);
       params.push(like, like);
     }
     const sql = `SELECT * FROM ${table} ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY booking_date DESC, id DESC LIMIT ?`;
@@ -590,7 +599,7 @@ export class Db {
     const where: string[] = [];
     const params: unknown[] = [];
     if (opts.country) { where.push("country = ?"); params.push(opts.country.toUpperCase()); }
-    if (opts.search) { where.push("name LIKE ?"); params.push(`%${opts.search}%`); }
+    if (opts.search) { where.push("name LIKE ? ESCAPE '\\'"); params.push(likeContains(opts.search)); }
     params.push(opts.limit);
     return (await this.d1.prepare(
       `SELECT * FROM aspsp_cache ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY country, name LIMIT ?`
@@ -656,6 +665,20 @@ export class Db {
       .bind(key, `-${windowSeconds} seconds`, `-${windowSeconds} seconds`, `-${windowSeconds} seconds`, max)
       .first<{ count: number }>();
     return row !== null;
+  }
+
+  /**
+   * Housekeeping for the nightly cron: rate-limit windows are at most an hour,
+   * so rows older than a day are dead weight; auth_state rows are single-use
+   * and expire after `authStateTtlMinutes`, so used or expired ones can go.
+   */
+  async pruneEphemeralRows(authStateTtlMinutes: number): Promise<{ rate_limit: number; auth_state: number }> {
+    const [rateLimit, authState] = await this.d1.batch([
+      this.d1.prepare("DELETE FROM rate_limit WHERE window_start < datetime('now', '-1 day')"),
+      this.d1.prepare("DELETE FROM auth_state WHERE used_at IS NOT NULL OR created_at <= datetime('now', ?)")
+        .bind(`-${authStateTtlMinutes} minutes`),
+    ]);
+    return { rate_limit: rateLimit.meta.changes ?? 0, auth_state: authState.meta.changes ?? 0 };
   }
 
   // ---- account identities (Step 0) ----
