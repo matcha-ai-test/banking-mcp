@@ -178,7 +178,7 @@ There are two ways to authenticate the connector. Both send the same `CONNECTION
 **Option A: Sign in (OAuth, recommended)**
 
 1. Add the `/mcp` URL as a custom connector and set Authentication to **Sign in now**.
-2. Under OAuth client choose **Register automatically** (DCR). The server does not serve a client ID metadata document, so "Use Claude's published identity" does not apply.
+2. Under OAuth client choose **Register automatically** (DCR, recommended) or **Use Claude's published identity**. The server accepts both: it resolves client ID metadata documents (an https URL as `client_id`) as well as dynamic registration. If the published identity fails with "Invalid OAuth request", switch to Register automatically.
 3. Click Add, then Connect. The server opens its approval page in the same tab; enter `CONNECTION_PASSWORD` there and press Approve. Claude then exchanges the code and attaches the connector.
 
 Deployments made before 2026-09-16 blocked this flow in Chrome: the approval page sent a `Content-Security-Policy` with `form-action 'self'`, which Chrome also applies to the redirect that follows the form POST, so the browser dropped the 302 back to claude.ai and Claude restarted the flow indefinitely ([issue #14](https://github.com/matcha-ai-test/banking-mcp/issues/14)). The page now allows the client's redirect origin. If you deployed earlier and see the approval page reappear after Approve, pull and redeploy, or use option B.
@@ -356,6 +356,6 @@ Bug reports, security reports, and pull requests are welcome. See [CONTRIBUTING.
 
 ## License
 
-[AGPL-3.0-or-later](LICENSE) · Copyright © 2026 Leon Curmak.
+[AGPL-3.0-or-later](LICENSE) · Copyright © 2026 Leon.
 
 See the license text for source-distribution and remote-network interaction requirements. For an older version, consult the license included with that commit.
