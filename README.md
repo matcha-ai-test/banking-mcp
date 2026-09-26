@@ -263,7 +263,7 @@ Bank availability comes from Enable Banking: live during `auth:link`, and from t
 The Worker caches accounts, balances, and transactions in its D1 database. Sessions are managed per bank and personal/business account type. Most tools read the cache; `refresh_now`, an uncached `get_transaction_details`, and `get_auth_status` with `verify: true` can contact Enable Banking.
 
 - A cron job syncs every active session at 04:00 and 16:00 UTC. Only the 04:00 run enriches own-name transfers and refreshes the bank list; the 16:00 run fetches transactions and balances only.
-- Manual refreshes and uncached detail requests share a server-enforced budget of 3 per session per UTC day. Scheduled sync and its enrichment use separate controls. This application policy is not a guarantee of any bank's request allowance.
+- Manual refreshes and uncached detail requests share a server-enforced budget of 2 per session per UTC day. Scheduled sync and its enrichment use separate controls. This application policy is not a guarantee of any bank's request allowance.
 - The first connection backfills history, trying up to 5 years and falling back to shorter windows if the bank refuses.
 - A bank consent lasts at most 180 days. Every tool response carries a warning from 14 days before expiry, and the operator renews by running `auth:link` for that bank again.
 - Upstream transaction records and fetched details are retained in the private cache. MCP responses expose selected fields and mask IBANs; protect database access and backups as sensitive bank data.

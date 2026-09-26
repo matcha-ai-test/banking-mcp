@@ -106,9 +106,10 @@ function oauthProviderFor(env: Env): OAuthProvider {
 const OAUTH_ENDPOINTS = new Set(["/authorize", "/token", "/register"]);
 const NOT_CONFIGURED = "Not configured. Run npm run install:mcp from the repository.";
 
-/** Failed /mcp connection-password attempts allowed per client bucket per window. */
 /** Must match the second entry of triggers.crons in wrangler.jsonc. */
 const AFTERNOON_CRON = "0 16 * * *";
+
+/** Failed /mcp connection-password attempts allowed per client bucket per window. */
 const MCP_FAILURES_PER_WINDOW = 20;
 const MCP_FAILURE_WINDOW_MS = 10 * 60_000;
 
