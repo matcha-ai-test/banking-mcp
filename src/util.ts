@@ -11,6 +11,16 @@ export async function rateLimitKey(request: Request, action: string): Promise<st
   return `${action}:${(await sha256Hex(client)).slice(0, 16)}`;
 }
 
+/**
+ * Signed integer cents from a bank's unsigned-magnitude convention: negative
+ * for money out (DBIT), positive for money in (CRDT). Stored amount_cents is
+ * treated as magnitude-only (Math.abs) so a bank that already stored a
+ * negative DBIT amount doesn't get double-negated.
+ */
+export function signedAmountCents(amountCents: number, creditDebit: string): number {
+  return creditDebit === "DBIT" ? -Math.abs(amountCents) : Math.abs(amountCents);
+}
+
 /** Opaque stable account reference (account_identities.id): 32 lowercase hex chars. */
 export const ACCOUNT_REF_RE = /^[0-9a-f]{32}$/;
 /** transactionKey output shape: sha256Hex is 64 lowercase hex chars. */

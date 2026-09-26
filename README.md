@@ -222,18 +222,39 @@ Not documented yet. The CLI configuration above does not by itself configure a c
 | `list_accounts` | Cached accounts, masked IBANs, latest cached balances, and last sync time |
 | `set_account_label` | Attach or clear a personal label on one linked account, keyed on its stable `account_ref`. Stored locally, survives re-authorization, never writes to the bank |
 | `get_balances` | Cached balances, optionally filtered by account name, last four IBAN digits, or bank |
-| `get_transactions` | Up to 500 cached transactions, pending included by default, with account, date, and text filters |
+| `get_transactions` | Up to 500 cached transactions, pending included by default, with account, date, and text filters. Each row carries its local category and the `account_ref` / `transaction_key` selectors |
 | `get_transaction_details` | Details for a matching transaction. Uses cached details when available; otherwise makes a budgeted bank request and caches the result |
 | `refresh_now` | Live refresh from the bank, limited to 3 per bank session per UTC day and shared across all connected clients. Adds a `hint` field when a session syncs zero accounts. Enrichment during the refresh is configurable (see below) and can be previewed with `enrichment_dry_run` at zero cost |
 | `get_auth_status` | Cached session metadata by default. Optional `verify: true` checks sessions live, with a verification cooldown. Returns no token or secret link |
-| `export_statements` | Bulk JSON export of cached booked transactions since a date, default `2025-01-01`, with a running balance per row. Can be filtered by bank and by account |
-| `spending_summary` | Server-side totals of cached booked transactions per currency, grouped by month, counterparty, or account. Use it for sums and breakdowns so the model never adds up rows itself |
+| `export_statements` | Bulk JSON export of cached booked transactions since a date, default `2025-01-01`, with a running balance and the local category per row. Can be filtered by bank and by account |
+| `spending_summary` | Server-side totals of cached booked transactions per currency, grouped by month, counterparty, account, or local category (category covers at most 5,000 rows per call). Use it for sums and breakdowns so the model never adds up rows itself |
 | `amount_as_work_time` | Expresses an amount as hours of work from an explicit monthly net income or an estimate from cached inflows. A reflection aid, not advice |
 | `list_banks` | Banks Enable Banking supports, with country and personal/business support, from a local cache refreshed weekly by the nightly sync and on every `auth:link`. Finds the exact ASPSP name for `auth:link` |
+| `create_category` | Create a local category, or return the existing one with the same normalized name. At most 200 |
+| `rename_category` | Rename a category by its stable id; rules and manual categorizations follow. Needs `expected_revision` |
+| `list_categories` | Local categories with id, name, revision, and rule count |
+| `add_rule` | Add a categorization rule. `rule_id` is a client-generated UUID, so a retry with identical content is a no-op. At most 500 rules |
+| `update_rule` | Replace a rule's fields at a given `expected_revision`; its id and creation order stay |
+| `list_rules` | Rules in evaluation order with revision and rank; filter by account, category, or enabled; paginate with `cursor` |
+| `delete_rule` | Delete one rule at a given revision. Manual categorizations are unaffected |
+| `preview_rule` | Cache-only impact sample for a rule: matches, rows it would win, rows kept by manual categorizations, and rules that outrank it. Writes nothing |
+| `categorize_transaction` | Manually set (or explicitly clear to uncategorized) one booked transaction's category, verified against its date, signed amount, and currency. Beats every rule. At most 10,000 |
+| `clear_transaction_category` | Remove a manual categorization so rules apply again |
 
 `list_accounts` also shows account metadata the bank supplied at link time (account type, usage, BIC, credit limit, and the last four digits of a card number); fields a bank did not supply are omitted. `get_transactions` accepts `compact: true` to drop null and empty fields from each row.
 
 `list_accounts` returns a stable `account_ref` (survives re-authorization; absent when the bank supplied neither an IBAN nor an identification hash) and an optional `label`, and every tool's `account` filter also accepts a label or an `account_ref`. An exact label or `account_ref` selects only that account. Labels are 3 to 60 characters and are rejected when they look like an account number or would collide with another account's name, bank, label, identifier, or last four digits. History is folded across re-authorizations only for rows with the same IBAN (or, for IBAN-less accounts such as cards, the same identification hash); anything ambiguous is left unfolded rather than merged. An account whose identity is ambiguous (typically a card first seen without an IBAN and later with one) gets no `account_ref` and is not retried until the bank reports different details. The operator resolves it from the repository: `npm run identity:resolve -- --remote list` shows parked accounts, then either `attach --account-uid <uid> --identity <account_ref>` (same account: it takes over that identity and its label) or `new --account-uid <uid>` (different account: fresh identity, no label). Add `--dry-run` to print the SQL first. No MCP tool can change identities.
+
+### Categories and rules
+
+Categories are local annotations stored in the Worker's own D1 database; nothing is written to the bank and no tool here makes a bank call or spends refresh budget. They are decided when you read, so a new or edited rule applies to history and future transactions alike, and no transaction row is ever rewritten.
+
+- **Precedence:** a manual categorization (`categorize_transaction`) wins; otherwise the highest-priority enabled matching rule (ties go to the older rule); otherwise `uncategorized`. `category_source` says which (`manual`, `rule`, `uncategorized`) and `category_rule_id` names the winning rule. A manual categorization with `category_id: null` keeps a transaction uncategorized even when rules match; `clear_transaction_category` hands it back to the rules.
+- **Rules** are an AND of predicates: account (`scope`), `direction` (`in`, `out`, or `any`, required and never guessed from the amount sign), counterparty and description text (`exact` or `contains`, compared after Unicode NFKC normalization, case-insensitively by simple lowercasing rather than full case folding, so `ß` does not match `SS`), an amount range in cents on the absolute amount (requires `currency`), and a day-of-month range. There is no regex. A rule for all accounts needs a text or amount predicate. Example: `{"category_id": "…", "scope": {"type": "all_accounts"}, "direction": "out", "counterparty": {"mode": "contains", "value": "grocery"}}`.
+- **Selectors:** manual categorizations are keyed on the stable `account_ref` plus a `transaction_key` derived from the cached transaction, so they survive re-authorization and history folding. Pending rows show provisional rule categories (`category_provisional: true`) and cannot be categorized manually. Accounts without an `account_ref` get rule categories but no `transaction_key`.
+- **Retries:** a write whose requested state is already stored returns `unchanged: true` even with a stale `expected_revision`, so retrying a landed change is safe. A deleted rule's `rule_id` is not reserved: retrying `add_rule` after `delete_rule` creates the rule again.
+- **Output:** `get_transactions` rows carry `amount_cents` (signed integer cents) to pass straight to `categorize_transaction`. With `compact: true` rows keep only `category` and `category_source`; the write selectors (`account_ref`, `transaction_key`, category and rule ids, override revision) are in the full shape only. `list_rules` pages with an opaque `cursor` (`next_cursor`).
+- **Safety:** every write takes `dry_run`, edits need `expected_revision` (optimistic locking; a stale value returns `revision_conflict`), writes share a budget of 30 per minute with `set_account_label`, and arguments are capped at 16 KiB. A manual categorization whose stored date, amount, currency, or direction no longer matches its transaction is not applied (`category_warning: "override_identity_conflict"`) and does not fall through to a rule. Category names and rule text that look like an account number are refused.
 
 Bank availability comes from Enable Banking: live during `auth:link`, and from the local `list_banks` cache in clients. Its documentation covers country-specific Open Banking support across [EU/EEA markets](https://enablebanking.com/docs/markets); available countries, banks, and Personal/Business support can change.
 
@@ -297,7 +318,7 @@ an unconfigured deployment behaves exactly as before.
 
 ## Security
 
-- No bank-side write tools, transfers, or payments exist in this server.
+- No bank-side write tools, transfers, or payments exist in this server. The only writes are local annotations in the Worker's own D1 database: account labels, categories, rules, and manual categorizations.
 - `/mcp` requires the generated connection password (`MCP_SECRET`), accepted either as `Authorization: Bearer <password>` or in one of the request headers claude.ai allows: `x-api-key`, `api-key`, `apikey`, `x-apikey`, `x-api-token`, `api-token`, or `x-auth-token`.
 - `/auth/start` requires the operator token (`START_TOKEN`), carried in the link fragment and exchanged for a short-lived cookie.
 - `/mcp` answers 429 after 20 wrong connection passwords from one client within 10 minutes. `/authorize` allows 10 attempts per hour. `/authorize`, `/token` and `/register` answer 503 until the deployment is configured.

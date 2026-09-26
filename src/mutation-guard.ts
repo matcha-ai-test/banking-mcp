@@ -23,6 +23,7 @@ export const ERROR_CODES = [
   "identity_conflict",
   "not_found",
   "label_collision",
+  "name_collision",
   "revision_conflict",
   "idempotency_conflict",
   "cap_reached",

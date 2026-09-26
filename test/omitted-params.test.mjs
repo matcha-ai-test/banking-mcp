@@ -7,6 +7,7 @@ import { createEnv, mockEnableBanking } from "./helpers.mjs";
 const { Db } = await import("../src/db.ts");
 const { readAuthStatus } = await import("../src/auth-status.ts");
 import { buildAuthStatus, serializeMcpText, AUTH_LINK_CMD, REFRESH_BUDGET_PER_DAY } from "../src/mcp-output.ts";
+import { signedAmountCents } from "../src/util.ts";
 
 const NOW = Date.parse("2030-01-01T12:00:00Z");
 const session = {
@@ -103,11 +104,18 @@ test("verify=true adds all live fields while preserving sync evidence and exclud
 });
 
 // Literal pre-details output, including pending rows and signed amounts.
+// Step 2 deliberately adds amount_cents after amount and appends the category
+// fields to every row (additive: the earlier keys keep their order and values). The account has no IBAN
+// or identification hash, so it has no stable account_ref and therefore no
+// writable transaction_key; with no rules it is uncategorized.
+const uncategorized = { category: null, category_id: null, category_source: "uncategorized", category_rule_id: null };
 const transactionsFixture = {
-  booked: [{ account: "Primary", booking_date: "2030-01-01", amount: -12.34,
-    currency: "EUR", counterparty: "Example payee", description: "Example purchase" }],
-  pending: [{ account: "Primary", booking_date: "2030-01-02", amount: 5.67,
-    currency: "EUR", counterparty: null, description: "Example refund", status: "PENDING" }],
+  booked: [{ account: "Primary", booking_date: "2030-01-01", amount: -12.34, amount_cents: -1234,
+    currency: "EUR", counterparty: "Example payee", description: "Example purchase",
+    account_ref: null, transaction_key: null, ...uncategorized, category_override_revision: null }],
+  pending: [{ account: "Primary", booking_date: "2030-01-02", amount: 5.67, amount_cents: 567,
+    currency: "EUR", counterparty: null, description: "Example refund", status: "PENDING",
+    account_ref: null, ...uncategorized, category_provisional: true }],
   note: "Amounts are signed: negative = money out, positive = money in. Cached data: see last_synced_at via list_accounts.",
 };
 
@@ -137,7 +145,9 @@ test("get_transactions with omitted params matches the hand-written pre-change o
   const input = z.object(inputSchema).parse({});
   assert.deepEqual(input, { limit: 100, include_pending: true });
   const moneyFunctions = source.slice(source.indexOf("function money("), source.indexOf("export class BankingMCP"));
-  dependencies.signed = Function(`${stripTypeScriptTypes(moneyFunctions)}; return signed;`)();
+  dependencies.signed = Function("signedAmountCents", `${stripTypeScriptTypes(moneyFunctions)}; return signed;`)(signedAmountCents);
+  dependencies.signedAmountCents = signedAmountCents;
+  ({ annotateTransactions: dependencies.annotateTransactions, categoryFields: dependencies.categoryFields } = await import("../src/categories.ts"));
   assertOutput(await handler("get_transactions", dependencies).call(self, input), transactionsFixture);
   assert.equal(mock.calls.length, 0);
   assert.equal((await db.activeSessions())[0].refresh_count_today, 0);

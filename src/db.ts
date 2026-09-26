@@ -13,6 +13,11 @@ export class Db {
     this.d1 = env.DB;
   }
 
+  /** Raw D1 handle for the categorization repository in src/categories.ts (bound SQL only). */
+  get database(): D1Database {
+    return this.d1;
+  }
+
   // ---- sessions ----
 
   async activeSessions(): Promise<EbSessionRow[]> {
