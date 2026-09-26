@@ -65,6 +65,9 @@ const defaultHandler = {
 // OAuth-authenticated /mcp requests pass the grant binding check (grant.ts) first.
 const oauthApiHandler = guardedApiHandler(mcpHandler);
 
+const REFRESH_TOKEN_TTL_SECONDS = 180 * 24 * 60 * 60;
+const CLIENT_REGISTRATION_TTL_SECONDS = 365 * 24 * 60 * 60;
+
 function createOAuthProvider(env: Env): OAuthProvider {
   return new OAuthProvider({
     apiRoute: "/mcp",
@@ -73,6 +76,12 @@ function createOAuthProvider(env: Env): OAuthProvider {
     authorizeEndpoint: "/authorize",
     tokenEndpoint: "/token",
     clientRegistrationEndpoint: "/register",
+    // The library defaults to a 30-day refresh token lifetime counted from the
+    // first sign-in (refreshing does not extend it), so every connector had to
+    // be re-authorized each month. Match the bank consent instead (~180 days),
+    // and keep the client registration (default 90 days) alive at least as long.
+    refreshTokenTTL: REFRESH_TOKEN_TTL_SECONDS,
+    clientRegistrationTTL: CLIENT_REGISTRATION_TTL_SECONDS,
     // claude.ai's default client option "Use Claude's published identity" sends
     // an https URL as client_id. Without this the provider answers
     // "Invalid client_id" on every first connection attempt. The library
