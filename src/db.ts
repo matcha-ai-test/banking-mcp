@@ -658,6 +658,20 @@ export class Db {
     return row !== null;
   }
 
+  /**
+   * Housekeeping for the nightly cron: rate-limit windows are at most an hour,
+   * so rows older than a day are dead weight; auth_state rows are single-use
+   * and expire after `authStateTtlMinutes`, so used or expired ones can go.
+   */
+  async pruneEphemeralRows(authStateTtlMinutes: number): Promise<{ rate_limit: number; auth_state: number }> {
+    const [rateLimit, authState] = await this.d1.batch([
+      this.d1.prepare("DELETE FROM rate_limit WHERE window_start < datetime('now', '-1 day')"),
+      this.d1.prepare("DELETE FROM auth_state WHERE used_at IS NOT NULL OR created_at <= datetime('now', ?)")
+        .bind(`-${authStateTtlMinutes} minutes`),
+    ]);
+    return { rate_limit: rateLimit.meta.changes ?? 0, auth_state: authState.meta.changes ?? 0 };
+  }
+
   // ---- account identities (Step 0) ----
 
   async identityByIban(iban: string, currency: string, psuType: PsuType): Promise<AccountIdentityRow | null> {

@@ -321,7 +321,8 @@ an unconfigured deployment behaves exactly as before.
 - No bank-side write tools, transfers, or payments exist in this server. The only writes are local annotations in the Worker's own D1 database: account labels, categories, rules, and manual categorizations.
 - `/mcp` requires the generated connection password (`MCP_SECRET`), accepted either as `Authorization: Bearer <password>` or in one of the request headers claude.ai allows: `x-api-key`, `api-key`, `apikey`, `x-apikey`, `x-api-token`, `api-token`, or `x-auth-token`.
 - `/auth/start` requires the operator token (`START_TOKEN`), carried in the link fragment and exchanged for a short-lived cookie.
-- `/mcp` answers 429 after 20 wrong connection passwords from one client within 10 minutes. `/authorize` allows 10 attempts per hour. `/authorize`, `/token` and `/register` answer 503 until the deployment is configured.
+- `/mcp` answers 429 after 20 wrong connection passwords from one client within 10 minutes. A bearer token the OAuth provider rejects counts as a wrong password in the same bucket. `/authorize` allows 10 attempts per hour and `/register` 10 client registrations per hour. `/authorize`, `/token` and `/register` answer 503 until the deployment is configured.
+- The nightly cron deletes rate-limit rows older than a day and used or expired bank sign-in states.
 - A Restricted Enable Banking application can access only accounts linked to it.
 - Local secrets are stored in Git-ignored `.dev.vars`; cloud secrets are uploaded as encrypted Cloudflare Worker secrets. With `--both`, the same secrets are also written to the local `.dev.vars`.
 - `.dev.vars`, `.mcp-credentials`, `wrangler.local.jsonc`, `.pem`, and `.key` files are excluded from Git.

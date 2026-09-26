@@ -189,6 +189,64 @@ test("B6: a correct password is never counted by the limiter", async (t) => {
   assert.equal(rows.length, 0);
 });
 
+test("B6: a bearer the OAuth provider rejects counts in the same bucket as a wrong x-api-key", async (t) => {
+  const worker = (await import("../src/index.ts")).default;
+  const env = { ...(await freshEnv(t)), OAUTH_KV: memoryKv() };
+  const ip = "198.51.100.4";
+  const bearer = () => new Request(`${CLOUD}/mcp`, { method: "POST", headers: { authorization: "Bearer guessed-token", "CF-Connecting-IP": ip } });
+  const apiKey = () => new Request(`${CLOUD}/mcp`, { method: "POST", headers: { "x-api-key": "wrong", "CF-Connecting-IP": ip } });
+  for (let i = 0; i < 10; i++) assert.equal((await worker.fetch(bearer(), env, ctx())).status, 401, `bearer ${i + 1}`);
+  for (let i = 0; i < 10; i++) assert.equal((await worker.fetch(apiKey(), env, ctx())).status, 401, `api key ${i + 1}`);
+  // 20 wrong credentials in total: the 21st is refused whichever header it uses.
+  assert.equal((await worker.fetch(bearer(), env, ctx())).status, 429);
+  assert.equal((await worker.fetch(apiKey(), env, ctx())).status, 429);
+});
+
+test("B6: an unauthenticated /mcp request (OAuth discovery) is not counted", async (t) => {
+  const worker = (await import("../src/index.ts")).default;
+  const env = { ...(await freshEnv(t)), OAUTH_KV: memoryKv() };
+  const bare = new Request(`${CLOUD}/mcp`, { method: "POST", headers: { "CF-Connecting-IP": "198.51.100.5" } });
+  assert.equal((await worker.fetch(bare, env, ctx())).status, 401);
+  assert.equal(env.DB.sqlite.prepare("SELECT COUNT(*) AS n FROM rate_limit").get().n, 0);
+});
+
+// ------------------------------------------------------------- /register limit
+
+test("/register allows 10 registrations per client per hour, then answers 429 JSON", async (t) => {
+  const worker = (await import("../src/index.ts")).default;
+  const env = { ...(await freshEnv(t)), OAUTH_KV: memoryKv() };
+  const register = (ip) => new Request(`${CLOUD}/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "CF-Connecting-IP": ip },
+    body: JSON.stringify({ redirect_uris: ["https://client.example/cb"], client_name: "t", token_endpoint_auth_method: "none" }),
+  });
+  for (let i = 0; i < 10; i++) assert.equal((await worker.fetch(register("198.51.100.6"), env, ctx())).status, 201, `registration ${i + 1}`);
+  const blocked = await worker.fetch(register("198.51.100.6"), env, ctx());
+  assert.equal(blocked.status, 429);
+  assert.match(blocked.headers.get("Content-Type"), /application\/json/);
+  assert.equal((await blocked.json()).error, "too_many_requests");
+  assert.equal((await worker.fetch(register("198.51.100.7"), env, ctx())).status, 201);
+});
+
+// ------------------------------------------------------------- cron housekeeping
+
+test("the scheduled handler prunes stale rate_limit rows and used or expired auth_state rows", async (t) => {
+  const worker = (await import("../src/index.ts")).default;
+  // Unconfigured, so the handler prunes and then skips the bank sync.
+  const env = { ...(await freshEnv(t)), MCP_SECRET: "generated-connection-password" };
+  const sql = env.DB.sqlite;
+  sql.prepare("INSERT INTO rate_limit (key, count, window_start) VALUES ('old', 3, datetime('now', '-2 days')), ('fresh', 1, datetime('now'))").run();
+  sql.prepare(`INSERT INTO auth_state (state, psu_type, created_at, used_at) VALUES
+    ('used', 'personal', datetime('now'), datetime('now')),
+    ('expired', 'personal', datetime('now', '-1 hour'), NULL),
+    ('live', 'personal', datetime('now'), NULL)`).run();
+  const pending = [];
+  await worker.scheduled({}, env, { waitUntil: (p) => pending.push(p), passThroughOnException() {} });
+  await Promise.all(pending);
+  assert.deepEqual(sql.prepare("SELECT key FROM rate_limit ORDER BY key").all().map((r) => r.key), ["fresh"]);
+  assert.deepEqual(sql.prepare("SELECT state FROM auth_state ORDER BY state").all().map((r) => r.state), ["live"]);
+});
+
 // ------------------------------------------------------------- B3 conflicts
 
 async function seedConflict(env) {
