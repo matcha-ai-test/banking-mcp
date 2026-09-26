@@ -134,7 +134,11 @@ export async function handleAuthorize(request: Request, env: Env & { OAUTH_PROVI
     request: oauthReq,
     userId: "operator",
     metadata: { approvedAt: new Date().toISOString() },
-    scope: oauthReq.scope ?? [],
+    // No scope is granted, whatever the client asked for: nothing in this server
+    // reads token scopes (access is all-or-nothing, gated by the password
+    // binding in props), so echoing a requested scope would only record a
+    // permission that means nothing and could mislead a later reader.
+    scope: [],
     // Binds the grant to the current connection password; see grant.ts.
     props: await grantProps(env.MCP_SECRET),
   });

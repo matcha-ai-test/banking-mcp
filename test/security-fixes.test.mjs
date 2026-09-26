@@ -97,6 +97,15 @@ function fakeProvider() {
   };
 }
 
+test("approval grants no scope even when the client requests one", async (t) => {
+  const env = await freshEnv(t);
+  const provider = fakeProvider();
+  provider.OAUTH_PROVIDER.parseAuthRequest = async () => ({ clientId: "c", redirectUri: "https://client.example/cb", scope: ["admin", "write"] });
+  const res = await handleAuthorize(authorizePost(env.MCP_SECRET), { ...env, ...provider });
+  assert.equal(res.status, 302);
+  assert.deepEqual(provider.completed[0].scope, []);
+});
+
 function authorizePost(password) {
   const body = new URLSearchParams({ password });
   return new Request(`${CLOUD}/authorize?client_id=c`, { method: "POST", body, headers: { "CF-Connecting-IP": "203.0.113.9" } });
