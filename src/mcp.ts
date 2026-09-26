@@ -526,11 +526,11 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
         inputSchema: {
           account: z.string().optional().describe("Account name, IBAN, uid or bank name. Omit for all accounts."),
           strategy: z.enum(["default", "longest"]).optional().describe('"longest" asks the bank for the deepest available history (use once after a re-authorization for backfill); omit for normal refreshes.'),
-          enrichment_backfill_days: z.number().int().min(0).optional().describe(
-            "Configurable. How far back (days) to look for existing cached rows still eligible for detail enrichment. Recommended starting point: 45 (conservative), not a selected default — omit to keep the current behavior. 0 disables backfill enrichment for this call; newly fetched rows can still be enrichment candidates."
+          enrichment_backfill_days: z.number().int().min(0).max(400).optional().describe(
+            "Configurable, 0-400. How far back (days) to look for existing cached rows still eligible for detail enrichment. Recommended starting point: 45 (conservative), not a selected default — omit to keep the current behavior. 0 disables backfill enrichment for this call; newly fetched rows can still be enrichment candidates."
           ),
-          enrichment_max: z.number().int().min(0).optional().describe(
-            "Configurable. Overrides both the per-account and per-bank-session enrichment detail-call caps for this call. Recommended starting point: 3 per account / 6 per bank session per run (conservative, unattended-sync recommendations — not documented bank limits) — omit to keep the current caps. 0 disables enrichment detail calls entirely for this call."
+          enrichment_max: z.number().int().min(0).max(20).optional().describe(
+            "Configurable, 0-20. Overrides both the per-account and per-bank-session enrichment detail-call caps for this call. Recommended starting point: 3 per account / 6 per bank session per run (conservative, unattended-sync recommendations — not documented bank limits) — omit to keep the current caps. 0 disables enrichment detail calls entirely for this call."
           ),
           enrichment_dry_run: z.boolean().optional().describe(
             "Configurable. If true, preview only: inspects the local cache for enrichment candidates honoring enrichment_backfill_days and enrichment_max, and returns a sanitized per-account and total candidate count. Makes zero Enable Banking calls, spends zero refresh/detail budget, and writes nothing; ignores strategy."
