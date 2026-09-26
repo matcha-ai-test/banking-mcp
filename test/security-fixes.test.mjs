@@ -247,6 +247,31 @@ test("the scheduled handler prunes stale rate_limit rows and used or expired aut
   assert.deepEqual(sql.prepare("SELECT state FROM auth_state ORDER BY state").all().map((r) => r.state), ["live"]);
 });
 
+// ------------------------------------------------------------- LIKE escaping
+
+test("transaction and bank searches treat % and _ literally", async (t) => {
+  const env = await freshEnv(t);
+  const db = new Db(env);
+  await db.insertSession({ id: "s", session_id: "u", psu_type: "personal", valid_until: null, aspsp_name: "Bank", aspsp_country: "SE" });
+  await db.upsertAccounts([{ account_uid: "a1", session_pk: "s", name: "A", iban: null, currency: "SEK", psu_type: "personal", product: null, last_synced_at: null }]);
+  const tx = (id, counterparty) => ({ account_uid: "a1", booking_date: "2030-01-01", value_date: null, amount_cents: 100,
+    currency: "SEK", credit_debit: "DBIT", counterparty, remittance_info: null, entry_reference: id, dedup_key: `er:${id}`, raw: null });
+  await db.insertTransactionsIgnore([tx("1", "Shop 100% off"), tx("2", "Shop 1000"), tx("3", "a_b"), tx("4", "axb"), tx("5", "back\\slash")]);
+  const search = async (q) => (await db.queryTransactions({ search: q, limit: 50 })).map((r) => r.counterparty).sort();
+  assert.deepEqual(await search("100%"), ["Shop 100% off"]);
+  assert.deepEqual(await search("a_b"), ["a_b"]);
+  assert.deepEqual(await search("%"), ["Shop 100% off"]);
+  assert.deepEqual(await search("back\\slash"), ["back\\slash"]);
+  assert.equal((await search("shop")).length, 2, "plain searches still match case-insensitively");
+
+  const at = new Date().toISOString();
+  await db.upsertAspsps([
+    { name: "Bank_One", country: "SE", psu_types: null, maximum_consent_validity: null, fetched_at: at },
+    { name: "BankXOne", country: "SE", psu_types: null, maximum_consent_validity: null, fetched_at: at },
+  ]);
+  assert.deepEqual((await db.queryAspsps({ search: "Bank_One", limit: 10 })).map((r) => r.name), ["Bank_One"]);
+});
+
 // ------------------------------------------------------------- B3 conflicts
 
 async function seedConflict(env) {
