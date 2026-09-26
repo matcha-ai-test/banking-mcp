@@ -1,11 +1,10 @@
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { refreshAspspCache } from "./aspsps";
 import { handleAuthCallback, handleAuthSession, handleAuthStart } from "./auth";
-import { ensureIdentityBackfill } from "./bootstrap";
+import { initializeStorage } from "./bootstrap";
 import { Db } from "./db";
 import { EbClient } from "./eb";
 import { guardedApiHandler, refreshGrantCheck } from "./grant-guard";
-import { migrate } from "./migrate";
 import { BankingMCP } from "./mcp";
 import { handleAuthorize } from "./oauth";
 import { homePage, privacyPage, termsPage } from "./pages";
@@ -18,21 +17,11 @@ export { BankingMCP };
 
 const mcpHandler = BankingMCP.serve("/mcp", { binding: "MCP_OBJECT" });
 
-// The migration is idempotent, but it is ~11 D1 statements; run it once per
-// isolate rather than on every request. A failed run is forgotten so the next
-// request retries instead of poisoning the isolate. The identity backfill is
-// memoized separately (in bootstrap.ts, keyed on its own success) so a
-// migrate-only memo here can never keep a not-yet-done backfill stuck behind
-// a "success" memo: ensureIdentityBackfill is cheap (a no-op) once it has
-// actually finished, and is safe to call on every request until then.
-let migrated: Promise<void> | null = null;
+// Migration runs once per isolate (memoized in bootstrap.ts and shared with the
+// MCP Durable Object's init); the identity backfill has its own success-keyed
+// throttle there, so a not-yet-done backfill is never stuck behind the memo.
 async function resolve(env: Env): Promise<Env> {
-  migrated ??= migrate(env.DB).catch((e) => {
-    migrated = null;
-    throw e;
-  });
-  await migrated;
-  await ensureIdentityBackfill(env);
+  await initializeStorage(env);
   return env;
 }
 

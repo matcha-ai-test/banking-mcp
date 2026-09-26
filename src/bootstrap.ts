@@ -36,10 +36,35 @@ export async function ensureIdentityBackfill(env: Env): Promise<void> {
   }
 }
 
+/**
+ * Per-isolate migration memo, shared by the Worker fetch/scheduled path
+ * (index.ts) and the MCP Durable Object's init (mcp.ts), so an isolate that
+ * serves both runs the ~11 idempotent statements once instead of once per
+ * entry point and once per Durable Object start. A failed run is forgotten, so
+ * the next caller retries instead of the isolate being poisoned. Every
+ * deployment binds exactly one D1 database, which is what makes a single memo
+ * per isolate correct.
+ */
+let migrated: Promise<void> | null = null;
+
+export function ensureMigrated(env: Env): Promise<void> {
+  migrated ??= migrate(env.DB).catch((e) => {
+    migrated = null;
+    throw e;
+  });
+  return migrated;
+}
+
+/** Test-only: forget the migration memo so a test can point initializeStorage
+ * at a different (for example broken) database. Never called from production. */
+export function __resetStorageInitForTests(): void {
+  migrated = null;
+}
+
 /** Single initialization path: migrate the schema, then backfill any account
  * rows that still lack a stable-identity pointer (idempotent, cheap, retried
  * on later calls while not yet done). */
 export async function initializeStorage(env: Env): Promise<void> {
-  await migrate(env.DB);
+  await ensureMigrated(env);
   await ensureIdentityBackfill(env);
 }
