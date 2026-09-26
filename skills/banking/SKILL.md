@@ -35,7 +35,7 @@ On claude.ai/desktop the tools sit under the connector's UUID prefix — use the
 ## Cache and live requests
 
 All tools are read-only toward the bank. Live operations can update the server's own cache and accounting state.
-- `refresh_now` and uncached `get_transaction_details` share a server-enforced budget of 3/session/UTC day. This is an application policy, not a documented bank limit. Scheduled sync and enrichment have separate controls. Never use `refresh_now` to test connectivity; use `get_auth_status` with `verify: true` if a live check is required.
+- `refresh_now` and uncached `get_transaction_details` share a server-enforced budget of 2/session/UTC day. This is an application policy, not a documented bank limit. Scheduled sync and enrichment have separate controls. Never use `refresh_now` to test connectivity; use `get_auth_status` with `verify: true` if a live check is required.
 - `refresh_now`'s enrichment of own-name transfers is configurable, not fixed: `enrichment_backfill_days`
   and `enrichment_max` accept overrides (45 days / 3 per account / 6 per bank session are conservative
   starting recommendations and runtime fallback values, not bank-documented limits). `enrichment_max` overrides both caps with the same value. `enrichment_dry_run: true`

@@ -26,7 +26,7 @@ const authFixture = {
     cached_status: "active", cached_valid_until: "2030-01-31T12:00:00Z",
     days_left_from_cached_valid_until: 30,
     last_live_verified_at: "2030-01-01 11:00:00", last_live_result: "ok",
-    renewal_due: false, refreshes_used_today: 1, refresh_budget_per_day: 3,
+    renewal_due: false, refreshes_used_today: 1, refresh_budget_per_day: 2,
     rate_limit_backoff_until: null,
   }],
   add_bank: "To connect another bank, first link its accounts to the application in the Enable Banking Control Panel (Restricted access), then run 'npm run auth:link -- --bank=<ASPSP name> --country=<ISO code> [--psu=business]' on the operator machine.",
@@ -50,7 +50,7 @@ function context(t, syncSummary) {
   const db = {
     allSessions: async (limit) => { assert.equal(limit, 10); return [session]; },
     activeSessions: async () => [session],
-    tryChargeRefreshBudget: async (...args) => { bumps.push(args); return { charged: true, count: 2 }; },
+    tryChargeRefreshBudget: async (...args) => { bumps.push(args); return { charged: true, count: 1 }; },
   };
   const self = { db: () => db, cfg: {}, env: {}, resolveAccountUids: async (_db, account) => {
     assert.equal(account, undefined); return null;
@@ -85,7 +85,7 @@ test("refresh_now with omitted params adds only the two enrichment summary count
     session: "Example Bank/personal", sessions: 1, accounts_synced: 2,
     new_transactions: 7, details_fetched: 2, details_failed: 1, errors: [], budget_left_today: 1,
   }]);
-  assert.deepEqual(bumps, [["local-fixture", "2030-01-01", 3]]);
+  assert.deepEqual(bumps, [["local-fixture", "2030-01-01", 2]]);
 });
 
 
@@ -168,14 +168,14 @@ for (const first of ["details", "refresh_now"]) {
       amount_cents: 1234, currency: "EUR", credit_debit: "DBIT", counterparty: null,
       remittance_info: "Example", entry_reference: "fixture", dedup_key: "fixture",
       raw: JSON.stringify({ transaction_id: "detail-id" }) }]);
-    env.DB.sqlite.prepare("UPDATE eb_sessions SET refresh_count_today = 2, refresh_count_date = '2030-01-01'").run();
+    env.DB.sqlite.prepare("UPDATE eb_sessions SET refresh_count_today = 1, refresh_count_date = '2030-01-01'").run();
     const mock = mockEnableBanking({ "GET /accounts/account/transactions/detail-id": {} });
     t.after(() => mock.restore());
     self.db = () => db;
     let syncCalls = 0;
     dependencies.syncAll = async () => {
       syncCalls++;
-      assert.equal((await db.activeSessions())[0].refresh_count_today, 3);
+      assert.equal((await db.activeSessions())[0].refresh_count_today, 2);
       return { sessions: 1, accounts_synced: 1, new_transactions: 0, details_fetched: 0, details_failed: 0, errors: [] };
     };
     // Force the chosen winner to reserve, then let the other tool contend while
@@ -199,17 +199,17 @@ for (const first of ["details", "refresh_now"]) {
     await ready;
     const loser = first === "details" ? refresh() : details();
     const [win, lose] = await Promise.all([winner, loser]);
-    assert.equal((await db.activeSessions())[0].refresh_count_today, 3);
+    assert.equal((await db.activeSessions())[0].refresh_count_today, 2);
     assert.equal(mock.calls.length, first === "details" ? 1 : 0);
     assert.equal(syncCalls, first === "refresh_now" ? 1 : 0);
     const refreshResult = JSON.parse((first === "refresh_now" ? win : lose).content[0].text);
     if (first === "details") {
       assert.equal(win.budget_left_today, 0);
       assert.deepEqual(refreshResult, [{ session: "Example Bank/personal",
-        skipped: "Daily refresh budget (3) used; serving cached data. Budget resets at midnight UTC." }]);
+        skipped: "Daily refresh budget (2) used; serving cached data. Budget resets at midnight UTC." }]);
     } else {
       assert.equal(refreshResult[0].budget_left_today, 0);
-      assert.deepEqual(lose, { error: "Daily refresh budget (3) used; serving cached data. Budget resets at midnight UTC.", budget_left_today: 0 });
+      assert.deepEqual(lose, { error: "Daily refresh budget (2) used; serving cached data. Budget resets at midnight UTC.", budget_left_today: 0 });
     }
   });
 }

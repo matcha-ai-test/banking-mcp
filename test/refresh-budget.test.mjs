@@ -54,24 +54,24 @@ async function setup(t, { sessions = 1, accounts = true, count = 0, date = "2030
     warnings: async () => buildSessionWarnings(await db.sessionsNeedingWarning()) };
   return { env, db, mock, self };
 }
-const skipped = [{ session: "Example Bank/personal", skipped: "Daily refresh budget (3) used; serving cached data. Budget resets at midnight UTC." }];
-const empty = [{ session: "Example Bank/personal", sessions: 1, accounts_synced: 0, new_transactions: 0, details_fetched: 0, details_failed: 0, errors: [], budget_left_today: 2,
+const skipped = [{ session: "Example Bank/personal", skipped: "Daily refresh budget (2) used; serving cached data. Budget resets at midnight UTC." }];
+const empty = [{ session: "Example Bank/personal", sessions: 1, accounts_synced: 0, new_transactions: 0, details_fetched: 0, details_failed: 0, errors: [], budget_left_today: 1,
   hint: "No accounts synced for this session. Link the account to the application in the Enable Banking Control Panel (Restricted access), or re-authorize with the correct country (PayPal, for example, is per country): 'npm run auth:link -- --bank=<ASPSP name> --country=<ISO code> [--psu=business]'." }];
 const failed = [{ session: "Example Bank/personal", sessions: 1, accounts_synced: 0, new_transactions: 0, details_fetched: 0, details_failed: 0,
-  errors: ["account sync failed (Error)", "account sync failed (Error)", "account sync failed (Error)"], budget_left_today: 2 }];
+  errors: ["account sync failed (Error)", "account sync failed (Error)", "account sync failed (Error)"], budget_left_today: 1 }];
 const noSession = { error: "No active bank session. Ask the operator to run 'npm run auth:link -- --bank=<ASPSP name> --country=<ISO code> [--psu=business]' on the operator machine." };
 const backedOff = [{ session: "Example Bank/personal", sessions: 0, accounts_synced: 0, new_transactions: 0, details_fetched: 0, details_failed: 0,
-  errors: ["session personal: in rate-limit backoff until 2030-01-02T00:00:00Z"], budget_left_today: 2 }];
-const success = [{ session: "Example Bank/personal", sessions: 1, accounts_synced: 3, new_transactions: 0, details_fetched: 0, details_failed: 0, errors: [], budget_left_today: 2 }];
+  errors: ["session personal: in rate-limit backoff until 2030-01-02T00:00:00Z"], budget_left_today: 1 }];
+const success = [{ session: "Example Bank/personal", sessions: 1, accounts_synced: 3, new_transactions: 0, details_fetched: 0, details_failed: 0, errors: [], budget_left_today: 1 }];
 for (const [name, options, fixture, calls, finalCount] of [
-  ["skipped", { count: 3 }, skipped, 0, 3],
+  ["skipped", { count: 2 }, skipped, 0, 2],
   ["HTTP error", { failure: true }, failed, 3, 1],
   ["empty active session", { accounts: false }, empty, 0, 1],
   ["no active sessions", { sessions: 0 }, noSession, 0, null],
   ["backoff", { backoff: true }, backedOff, 0, 1],
   ["NULL date with exhausted count", { count: 9, date: null }, success, 6, 1],
-  ["NULL date error", { count: 3, date: null, failure: true }, failed, 3, 1],
-  ["NULL date empty session", { count: 3, date: null, accounts: false }, empty, 0, 1],
+  ["NULL date error", { count: 2, date: null, failure: true }, failed, 3, 1],
+  ["NULL date empty session", { count: 2, date: null, accounts: false }, empty, 0, 1],
 ]) {
   for (const [version, code] of [["HEAD", head], ["current", source]]) {
     test(`unfiltered ${name}: ${version} matches literal HEAD fixture with real Db and syncAll`, async (t) => {
@@ -89,14 +89,14 @@ test("filtered refresh across two sessions charges only the owner and syncs only
   const { env, mock, self } = await setup(t, { sessions: 2 });
   const result = await handler(source).call(self, { account: "Selected 1" });
   assert.deepEqual(JSON.parse(result.content[0].text), [{ session: "Example Bank/personal", sessions: 1,
-    accounts_synced: 2, new_transactions: 0, details_fetched: 0, details_failed: 0, errors: [], budget_left_today: 2 }]);
+    accounts_synced: 2, new_transactions: 0, details_fetched: 0, details_failed: 0, errors: [], budget_left_today: 1 }]);
   assert.deepEqual(env.DB.sqlite.prepare("SELECT refresh_count_today FROM eb_sessions ORDER BY id").all()
     .map((r) => r.refresh_count_today), [0, 1]);
   assert.deepEqual(mock.calls.map((c) => c.path), ["/accounts/account-1-a/transactions", "/accounts/account-1-a/balances",
     "/accounts/account-1-b/transactions", "/accounts/account-1-b/balances"]);
 });
 
-test("concurrent successful refreshes report 2 then 1 left using their own RETURNING row", async (t) => {
+test("concurrent successful refreshes report 1 then 0 left using their own RETURNING row", async (t) => {
   const { db, self } = await setup(t, { accounts: false });
   const charge = db.tryChargeRefreshBudget.bind(db);
   let arrived = 0;
@@ -109,5 +109,5 @@ test("concurrent successful refreshes report 2 then 1 left using their own RETUR
   };
   const refresh = handler(source);
   const results = await Promise.all([refresh.call(self, {}), refresh.call(self, {})]);
-  assert.deepEqual(results.map((r) => JSON.parse(r.content[0].text)[0].budget_left_today), [2, 1]);
+  assert.deepEqual(results.map((r) => JSON.parse(r.content[0].text)[0].budget_left_today), [1, 0]);
 });
