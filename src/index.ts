@@ -95,6 +95,9 @@ function oauthProviderFor(env: Env): OAuthProvider {
 const OAUTH_ENDPOINTS = new Set(["/authorize", "/token", "/register"]);
 const NOT_CONFIGURED = "Not configured. Run npm run install:mcp from the repository.";
 
+/** Must match the second entry of triggers.crons in wrangler.jsonc. */
+const AFTERNOON_CRON = "0 16 * * *";
+
 /**
  * Failed /mcp credential attempts allowed per client bucket per window. A wrong
  * API key header and a bearer the OAuth provider rejects count against the same
@@ -194,7 +197,7 @@ export default {
     }
   },
 
-  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(
       (async () => {
         const resolved = await resolve(env);
@@ -207,13 +210,18 @@ export default {
         }
         if (!isConfigured(resolved)) return;
         const policy = enrichmentPolicyFromEnv(resolved);
+        // Two scheduled runs a day (04:00 and 16:00 UTC) plus the refresh_now budget stay within the
+        // roughly four unattended fetches banks allow. Only the morning run spends detail calls on
+        // enrichment; the afternoon run fetches transactions and balances and nothing else.
+        const isMainRun = event.cron !== AFTERNOON_CRON;
         const summary = await syncAll(resolved, "cron", {
           enrichBackfillDays: policy.enrichBackfillDays,
-          enrichMaxPerAccount: policy.enrichMaxPerAccount,
-          enrichMaxPerSession: policy.enrichMaxPerSession,
+          enrichMaxPerAccount: isMainRun ? policy.enrichMaxPerAccount : 0,
+          enrichMaxPerSession: isMainRun ? policy.enrichMaxPerSession : 0,
         });
         console.log("cron sync:", JSON.stringify(summary));
         // Directory call to Enable Banking, not to any bank: no refresh budget is spent.
+        if (!isMainRun) return;
         const refreshed = await refreshAspspCache(new Db(resolved), () => new EbClient(resolved).getAspsps());
         if (refreshed) console.log("cron: bank list cache refreshed");
       })()
