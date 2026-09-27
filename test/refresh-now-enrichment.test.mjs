@@ -206,3 +206,28 @@ test("enrichment_dry_run reports no active session error the same way as a norma
   assert.equal(output.dry_run, true);
   assert.equal(output.total_candidates, 0);
 });
+
+// --- Hard ceilings: zod rejects oversized values, and the sync helper clamps anything that slips past ---
+
+test("refresh_now caps enrichment_backfill_days at 400 and enrichment_max at 20 in its zod schema", () => {
+  const schema = refreshNowSchemaSource();
+  assert.match(schema, /enrichment_backfill_days: z\.number\(\)\.int\(\)\.min\(0\)\.max\(400\)/);
+  assert.match(schema, /enrichment_max: z\.number\(\)\.int\(\)\.min\(0\)\.max\(20\)/);
+});
+
+test("the sync helper clamps oversized enrichment values even when called directly", async (t) => {
+  const { ENRICH_MAX_CEILING } = await import("../src/sync.ts");
+  const rows = Array.from({ length: 25 }, (_, i) => transaction(`id-${i}`, [], { booking_date: daysAgo(i % 5) }));
+  const { env, db } = await setup(t, { backfillRows: rows });
+  const preview = await previewEnrichmentCandidates(db, await db.allAccounts(), { enrichMax: 10_000, enrichBackfillDays: 10_000 });
+  assert.equal(preview.total_candidates, ENRICH_MAX_CEILING);
+  const summary = await syncAll(env, "manual", { enrichMax: 10_000, enrichBackfillDays: 10_000 });
+  assert.equal(summary.details_fetched, ENRICH_MAX_CEILING);
+});
+
+test("the backfill window is clamped to 400 days whatever the caller passes", async (t) => {
+  const rows = [transaction("old", [], { booking_date: daysAgo(500) }), transaction("recent", [], { booking_date: daysAgo(300) })];
+  const { db } = await setup(t, { backfillRows: rows });
+  const preview = await previewEnrichmentCandidates(db, await db.allAccounts(), { enrichBackfillDays: 10_000 });
+  assert.equal(preview.total_candidates, 1);
+});

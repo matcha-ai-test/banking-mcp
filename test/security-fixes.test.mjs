@@ -97,6 +97,15 @@ function fakeProvider() {
   };
 }
 
+test("approval grants no scope even when the client requests one", async (t) => {
+  const env = await freshEnv(t);
+  const provider = fakeProvider();
+  provider.OAUTH_PROVIDER.parseAuthRequest = async () => ({ clientId: "c", redirectUri: "https://client.example/cb", scope: ["admin", "write"] });
+  const res = await handleAuthorize(authorizePost(env.MCP_SECRET), { ...env, ...provider });
+  assert.equal(res.status, 302);
+  assert.deepEqual(provider.completed[0].scope, []);
+});
+
 function authorizePost(password) {
   const body = new URLSearchParams({ password });
   return new Request(`${CLOUD}/authorize?client_id=c`, { method: "POST", body, headers: { "CF-Connecting-IP": "203.0.113.9" } });
@@ -187,6 +196,89 @@ test("B6: a correct password is never counted by the limiter", async (t) => {
   await worker.fetch(ok, env, ctx());
   const rows = env.DB.sqlite.prepare("SELECT key FROM rate_limit WHERE key LIKE 'mcp-secret-fail:%'").all();
   assert.equal(rows.length, 0);
+});
+
+test("B6: a bearer the OAuth provider rejects counts in the same bucket as a wrong x-api-key", async (t) => {
+  const worker = (await import("../src/index.ts")).default;
+  const env = { ...(await freshEnv(t)), OAUTH_KV: memoryKv() };
+  const ip = "198.51.100.4";
+  const bearer = () => new Request(`${CLOUD}/mcp`, { method: "POST", headers: { authorization: "Bearer guessed-token", "CF-Connecting-IP": ip } });
+  const apiKey = () => new Request(`${CLOUD}/mcp`, { method: "POST", headers: { "x-api-key": "wrong", "CF-Connecting-IP": ip } });
+  for (let i = 0; i < 10; i++) assert.equal((await worker.fetch(bearer(), env, ctx())).status, 401, `bearer ${i + 1}`);
+  for (let i = 0; i < 10; i++) assert.equal((await worker.fetch(apiKey(), env, ctx())).status, 401, `api key ${i + 1}`);
+  // 20 wrong credentials in total: the 21st is refused whichever header it uses.
+  assert.equal((await worker.fetch(bearer(), env, ctx())).status, 429);
+  assert.equal((await worker.fetch(apiKey(), env, ctx())).status, 429);
+});
+
+test("B6: an unauthenticated /mcp request (OAuth discovery) is not counted", async (t) => {
+  const worker = (await import("../src/index.ts")).default;
+  const env = { ...(await freshEnv(t)), OAUTH_KV: memoryKv() };
+  const bare = new Request(`${CLOUD}/mcp`, { method: "POST", headers: { "CF-Connecting-IP": "198.51.100.5" } });
+  assert.equal((await worker.fetch(bare, env, ctx())).status, 401);
+  assert.equal(env.DB.sqlite.prepare("SELECT COUNT(*) AS n FROM rate_limit").get().n, 0);
+});
+
+// ------------------------------------------------------------- /register limit
+
+test("/register allows 10 registrations per client per hour, then answers 429 JSON", async (t) => {
+  const worker = (await import("../src/index.ts")).default;
+  const env = { ...(await freshEnv(t)), OAUTH_KV: memoryKv() };
+  const register = (ip) => new Request(`${CLOUD}/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "CF-Connecting-IP": ip },
+    body: JSON.stringify({ redirect_uris: ["https://client.example/cb"], client_name: "t", token_endpoint_auth_method: "none" }),
+  });
+  for (let i = 0; i < 10; i++) assert.equal((await worker.fetch(register("198.51.100.6"), env, ctx())).status, 201, `registration ${i + 1}`);
+  const blocked = await worker.fetch(register("198.51.100.6"), env, ctx());
+  assert.equal(blocked.status, 429);
+  assert.match(blocked.headers.get("Content-Type"), /application\/json/);
+  assert.equal((await blocked.json()).error, "too_many_requests");
+  assert.equal((await worker.fetch(register("198.51.100.7"), env, ctx())).status, 201);
+});
+
+// ------------------------------------------------------------- cron housekeeping
+
+test("the scheduled handler prunes stale rate_limit rows and used or expired auth_state rows", async (t) => {
+  const worker = (await import("../src/index.ts")).default;
+  // Unconfigured, so the handler prunes and then skips the bank sync.
+  const env = { ...(await freshEnv(t)), MCP_SECRET: "generated-connection-password" };
+  const sql = env.DB.sqlite;
+  sql.prepare("INSERT INTO rate_limit (key, count, window_start) VALUES ('old', 3, datetime('now', '-2 days')), ('fresh', 1, datetime('now'))").run();
+  sql.prepare(`INSERT INTO auth_state (state, psu_type, created_at, used_at) VALUES
+    ('used', 'personal', datetime('now'), datetime('now')),
+    ('expired', 'personal', datetime('now', '-1 hour'), NULL),
+    ('live', 'personal', datetime('now'), NULL)`).run();
+  const pending = [];
+  await worker.scheduled({}, env, { waitUntil: (p) => pending.push(p), passThroughOnException() {} });
+  await Promise.all(pending);
+  assert.deepEqual(sql.prepare("SELECT key FROM rate_limit ORDER BY key").all().map((r) => r.key), ["fresh"]);
+  assert.deepEqual(sql.prepare("SELECT state FROM auth_state ORDER BY state").all().map((r) => r.state), ["live"]);
+});
+
+// ------------------------------------------------------------- LIKE escaping
+
+test("transaction and bank searches treat % and _ literally", async (t) => {
+  const env = await freshEnv(t);
+  const db = new Db(env);
+  await db.insertSession({ id: "s", session_id: "u", psu_type: "personal", valid_until: null, aspsp_name: "Bank", aspsp_country: "SE" });
+  await db.upsertAccounts([{ account_uid: "a1", session_pk: "s", name: "A", iban: null, currency: "SEK", psu_type: "personal", product: null, last_synced_at: null }]);
+  const tx = (id, counterparty) => ({ account_uid: "a1", booking_date: "2030-01-01", value_date: null, amount_cents: 100,
+    currency: "SEK", credit_debit: "DBIT", counterparty, remittance_info: null, entry_reference: id, dedup_key: `er:${id}`, raw: null });
+  await db.insertTransactionsIgnore([tx("1", "Shop 100% off"), tx("2", "Shop 1000"), tx("3", "a_b"), tx("4", "axb"), tx("5", "back\\slash")]);
+  const search = async (q) => (await db.queryTransactions({ search: q, limit: 50 })).map((r) => r.counterparty).sort();
+  assert.deepEqual(await search("100%"), ["Shop 100% off"]);
+  assert.deepEqual(await search("a_b"), ["a_b"]);
+  assert.deepEqual(await search("%"), ["Shop 100% off"]);
+  assert.deepEqual(await search("back\\slash"), ["back\\slash"]);
+  assert.equal((await search("shop")).length, 2, "plain searches still match case-insensitively");
+
+  const at = new Date().toISOString();
+  await db.upsertAspsps([
+    { name: "Bank_One", country: "SE", psu_types: null, maximum_consent_validity: null, fetched_at: at },
+    { name: "BankXOne", country: "SE", psu_types: null, maximum_consent_validity: null, fetched_at: at },
+  ]);
+  assert.deepEqual((await db.queryAspsps({ search: "Bank_One", limit: 10 })).map((r) => r.name), ["Bank_One"]);
 });
 
 // ------------------------------------------------------------- B3 conflicts

@@ -3,9 +3,12 @@ node_modules/
 .env
 .env.*
 .dev.vars
+.dev.vars.*
+!.dev.vars.example
 .mcp-credentials
 wrangler.local.jsonc
 *.pem
 *.key
 .DS_Store
 dist/
+.claude/

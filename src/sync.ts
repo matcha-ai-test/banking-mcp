@@ -1,7 +1,7 @@
 import { Db } from "./db";
 import { EbClient, ExpiredSessionError, RateLimitError } from "./eb";
 import type { AccountRow, EbTransaction, Env, TxRow } from "./types";
-import { daysAgo, isoDate, sha256Hex } from "./util";
+import { daysAgo, isoDate, maskIban, sha256Hex } from "./util";
 
 const MAX_PAGES_PER_ACCOUNT = 80;
 const OVERLAP_DAYS = 10;
@@ -11,14 +11,19 @@ const BACKOFF_HOURS = 6;
 export const ENRICH_MAX_PER_ACCOUNT = 3;
 export const ENRICH_MAX_PER_SESSION = 6;
 export const ENRICH_BACKFILL_DAYS = 45;
+/** Hard ceilings, applied however a value arrives (refresh_now input, Worker var or code): one call can never
+ * scan more than ~13 months of cache or spend more than 20 detail calls per account or bank session. */
+export const ENRICH_BACKFILL_DAYS_CEILING = 400;
+export const ENRICH_MAX_CEILING = 20;
 
 interface EnrichmentBudget {
   remaining: number;
   stopped?: "rate_limited" | "expired";
 }
 
-function enrichmentLimit(value: number | undefined, fallback: number): number {
-  return value === undefined ? fallback : Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+function enrichmentLimit(value: number | undefined, fallback: number, ceiling = ENRICH_MAX_CEILING): number {
+  const n = value === undefined ? fallback : Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+  return Math.min(n, ceiling);
 }
 
 function parseNonNegativeInt(raw: string | undefined): number | undefined {
@@ -155,7 +160,7 @@ export async function syncAccount(
   const candidates = insertedRows.filter((row) => enrichmentCandidate(row, account.name))
     .sort((a, b) => b.booking_date.localeCompare(a.booking_date));
   const accountLimit = enrichmentLimit(opts.enrichMax ?? opts.enrichMaxPerAccount, ENRICH_MAX_PER_ACCOUNT);
-  const backfillDays = enrichmentLimit(opts.enrichBackfillDays, ENRICH_BACKFILL_DAYS);
+  const backfillDays = enrichmentLimit(opts.enrichBackfillDays, ENRICH_BACKFILL_DAYS, ENRICH_BACKFILL_DAYS_CEILING);
   if (backfillDays > 0 && accountLimit > 0 && !opts.enrichmentBudget?.stopped &&
     (opts.enrichmentBudget?.remaining ?? 1) > 0) {
     const seenIds = new Set(candidates.map((row) => row.id));
@@ -199,6 +204,8 @@ export async function syncAccount(
   let details_fetched = 0;
   let details_failed = 0;
   let metadataError: string | undefined;
+  // Worker logs and sync_log carry this string: a masked IBAN, never the account uid (same rule as auth.ts).
+  const accountLabel = maskIban(account.iban) ?? "account";
   for (const row of candidates) {
     if (budget.stopped || budget.remaining <= 0 || detailAttempts >= accountLimit) break;
     let claim: { id: number; at: string } | undefined;
@@ -220,17 +227,17 @@ export async function syncAccount(
         budget.stopped = "rate_limited";
         try {
           await db.setSessionBackoff(account.session_pk, new Date(Date.now() + BACKOFF_HOURS * 3600_000).toISOString());
-        } catch { metadataError = `${account.account_uid}: enrichment metadata write failed`; }
+        } catch { metadataError = `${accountLabel}: enrichment metadata write failed`; }
       } else if (error instanceof ExpiredSessionError) {
         budget.stopped = "expired";
         try {
           await db.setSessionExpired(account.session_pk);
-        } catch { metadataError = `${account.account_uid}: enrichment metadata write failed`; }
+        } catch { metadataError = `${accountLabel}: enrichment metadata write failed`; }
       }
     } finally {
       if (claim) {
         try { await db.releaseTransactionDetailClaim(claim.id, claim.at); }
-        catch { metadataError = `${account.account_uid}: enrichment metadata write failed`; }
+        catch { metadataError = `${accountLabel}: enrichment metadata write failed`; }
       }
     }
   }
@@ -351,7 +358,7 @@ export async function previewEnrichmentCandidates(
   accounts: AccountRow[],
   opts: { enrichMax?: number; enrichBackfillDays?: number } = {}
 ): Promise<EnrichmentPreview> {
-  const backfillDays = enrichmentLimit(opts.enrichBackfillDays, ENRICH_BACKFILL_DAYS);
+  const backfillDays = enrichmentLimit(opts.enrichBackfillDays, ENRICH_BACKFILL_DAYS, ENRICH_BACKFILL_DAYS_CEILING);
   const accountLimit = enrichmentLimit(opts.enrichMax, ENRICH_MAX_PER_ACCOUNT);
   const sessionBudget = enrichmentLimit(opts.enrichMax, ENRICH_MAX_PER_SESSION);
   const remainingBySession = new Map<string, number>();

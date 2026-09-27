@@ -5,6 +5,8 @@
   "compatibility_date": "2026-08-24",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "vars": {
+    // Read only by the npm scripts (setup, auth:link) to print local links. The
+    // Worker itself never reads BASE_URL; it derives its origin from each request.
     "BASE_URL": "http://127.0.0.1:8787"
   },
   "durable_objects": {

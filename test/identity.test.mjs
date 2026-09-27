@@ -15,7 +15,7 @@ const {
   backfillAccountIdentities,
   naturalIdentityOf,
 } = await import("../src/identity.ts");
-const { initializeStorage, ensureIdentityBackfill, __resetIdentityBackfillForTests } = await import("../src/bootstrap.ts");
+const { initializeStorage, ensureIdentityBackfill, __resetIdentityBackfillForTests, __resetStorageInitForTests } = await import("../src/bootstrap.ts");
 
 async function setup(t) {
   const env = await createEnv();
@@ -197,10 +197,29 @@ test("initializeStorage: a backfillAccountIdentities failure is caught and never
   await assert.doesNotReject(() => initializeStorage(env));
 });
 
-test("initializeStorage: a migrate failure still propagates", async () => {
+test("initializeStorage: a migrate failure still propagates", async (t) => {
   __resetIdentityBackfillForTests();
+  __resetStorageInitForTests();
+  t.after(() => __resetStorageInitForTests());
   const brokenEnv = { DB: { prepare: () => { throw new Error("db unavailable"); } } };
   await assert.rejects(() => initializeStorage(brokenEnv));
+});
+
+test("initializeStorage: migration runs once per isolate, and a failed run is retried", async (t) => {
+  __resetStorageInitForTests();
+  t.after(() => __resetStorageInitForTests());
+  let prepares = 0;
+  let fail = true;
+  const counting = { prepare: () => { prepares++; if (fail) throw new Error("db unavailable"); return { run: async () => ({}), all: async () => ({ results: [] }), first: async () => null, bind() { return this; } }; }, batch: async () => [] };
+  const { ensureMigrated } = await import("../src/bootstrap.ts");
+  await assert.rejects(() => ensureMigrated({ DB: counting }));
+  fail = false;
+  await ensureMigrated({ DB: counting });
+  const afterFirstSuccess = prepares;
+  assert.ok(afterFirstSuccess > 1, "the failed run is forgotten, so the second call really migrates");
+  await ensureMigrated({ DB: counting });
+  await ensureMigrated({ DB: counting });
+  assert.equal(prepares, afterFirstSuccess, "later calls reuse the memo");
 });
 
 // ------------------------------------------------------------------------- G4 / J3
