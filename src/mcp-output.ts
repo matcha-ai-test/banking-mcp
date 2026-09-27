@@ -4,7 +4,7 @@ import type { LiveSessionResult } from "./auth-status";
 /** The one operator command for connecting or renewing a bank; every hint and page quotes this. */
 export const AUTH_LINK_CMD = "npm run auth:link -- --bank=<ASPSP name> --country=<ISO code> [--psu=business]";
 export const RENEWAL_HINT = `Run '${AUTH_LINK_CMD}' on the operator machine to print a bank re-authorization link.`;
-export const REFRESH_BUDGET_PER_DAY = 3;
+export const REFRESH_BUDGET_PER_DAY = 2;
 
 const CACHED_NOTE =
   "Session metadata is cached; last_live_* shows the most recent verified bank call.";

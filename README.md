@@ -224,7 +224,7 @@ Not documented yet. The CLI configuration above does not by itself configure a c
 | `get_balances` | Cached balances, optionally filtered by account name, last four IBAN digits, or bank |
 | `get_transactions` | Up to 500 cached transactions, pending included by default, with account, date, and text filters. Each row carries its local category and the `account_ref` / `transaction_key` selectors |
 | `get_transaction_details` | Details for a matching transaction. Uses cached details when available; otherwise makes a budgeted bank request and caches the result |
-| `refresh_now` | Live refresh from the bank, limited to 3 per bank session per UTC day and shared across all connected clients. Adds a `hint` field when a session syncs zero accounts. Enrichment during the refresh is configurable (see below) and can be previewed with `enrichment_dry_run` at zero cost |
+| `refresh_now` | Live refresh from the bank, limited to 2 per bank session per UTC day and shared across all connected clients. Adds a `hint` field when a session syncs zero accounts. Enrichment during the refresh is configurable (see below) and can be previewed with `enrichment_dry_run` at zero cost |
 | `get_auth_status` | Cached session metadata by default. Optional `verify: true` checks sessions live, with a verification cooldown. Returns no token or secret link |
 | `export_statements` | Bulk JSON export of cached booked transactions since a date, default `2025-01-01`, with a running balance and the local category per row. Can be filtered by bank and by account |
 | `spending_summary` | Server-side totals of cached booked transactions per currency, grouped by month, counterparty, account, or local category (category covers at most 5,000 rows per call). Use it for sums and breakdowns so the model never adds up rows itself |
@@ -262,8 +262,8 @@ Bank availability comes from Enable Banking: live during `auth:link`, and from t
 
 The Worker caches accounts, balances, and transactions in its D1 database. Sessions are managed per bank and personal/business account type. Most tools read the cache; `refresh_now`, an uncached `get_transaction_details`, and `get_auth_status` with `verify: true` can contact Enable Banking.
 
-- A cron job syncs every active session at 04:00 UTC.
-- Manual refreshes and uncached detail requests share a server-enforced budget of 3 per session per UTC day. Scheduled sync and its enrichment use separate controls. This application policy is not a guarantee of any bank's request allowance.
+- A cron job syncs every active session at 04:00 and 16:00 UTC. Only the 04:00 run enriches own-name transfers and refreshes the bank list; the 16:00 run fetches transactions and balances only.
+- Manual refreshes and uncached detail requests share a server-enforced budget of 2 per session per UTC day. Scheduled sync and its enrichment use separate controls. This application policy is not a guarantee of any bank's request allowance.
 - The first connection backfills history, trying up to 5 years and falling back to shorter windows if the bank refuses.
 - A bank consent lasts at most 180 days. Every tool response carries a warning from 14 days before expiry, and the operator renews by running `auth:link` for that bank again.
 - Upstream transaction records and fetched details are retained in the private cache. MCP responses expose selected fields and mask IBANs; protect database access and backups as sensitive bank data.

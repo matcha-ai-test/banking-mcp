@@ -110,7 +110,7 @@ test("two concurrent distinct details with one slot left dispatch and charge exa
     "GET /accounts/account/transactions/second-id": DETAIL,
   });
   await db.insertTransactionsIgnore([row("second", { ...RAW, transaction_id: "second-id" })]);
-  env.DB.sqlite.prepare("UPDATE eb_sessions SET refresh_count_today = 2, refresh_count_date = '2030-01-01' WHERE id = 'selected'").run();
+  env.DB.sqlite.prepare("UPDATE eb_sessions SET refresh_count_today = 1, refresh_count_date = '2030-01-01' WHERE id = 'selected'").run();
   // Hold both callers at the real atomic update so they compete for the last slot.
   const charge = db.tryChargeRefreshBudget.bind(db);
   let arrived = 0;
@@ -124,25 +124,25 @@ test("two concurrent distinct details with one slot left dispatch and charge exa
   const results = await Promise.all([read({ ...INPUT, transaction_id: "detail-id" }), read({ ...INPUT, transaction_id: "second-id" })]);
   assert.equal(results.filter((r) => r.debtor_name === "Example payer").length, 1);
   assert.deepEqual(results.find((r) => r.error), {
-    error: "Daily refresh budget (3) used; serving cached data. Budget resets at midnight UTC.", budget_left_today: 0,
+    error: "Daily refresh budget (2) used; serving cached data. Budget resets at midnight UTC.", budget_left_today: 0,
   });
   assert.ok(results.every((r) => r.budget_left_today === 0));
   assert.equal(mock.calls.length, 1);
-  assert.deepEqual(bumps, [["selected", "2030-01-01", 3]]);
-  assert.equal(env.DB.sqlite.prepare("SELECT refresh_count_today AS n FROM eb_sessions WHERE id = 'selected'").get().n, 3);
+  assert.deepEqual(bumps, [["selected", "2030-01-01", 2]]);
+  assert.equal(env.DB.sqlite.prepare("SELECT refresh_count_today AS n FROM eb_sessions WHERE id = 'selected'").get().n, 2);
 });
 
 test("repeated failed HTTP attempts consume the budget and then stop dispatching", async (t) => {
   const { env, read, mock, bumps } = await setup(t, {
     "GET /accounts/account/transactions/detail-id": () => new Response("unavailable", { status: 503 }),
   });
-  for (let n = 1; n <= 3; n++) {
+  for (let n = 1; n <= 2; n++) {
     assert.deepEqual(await read(), { error: "transaction_details_failed" });
     assert.equal(env.DB.sqlite.prepare("SELECT refresh_count_today AS n FROM eb_sessions WHERE id = 'selected'").get().n, n);
   }
   assert.equal((await read()).budget_left_today, 0);
-  assert.equal(mock.calls.length, 3);
-  assert.equal(bumps.length, 3);
+  assert.equal(mock.calls.length, 2);
+  assert.equal(bumps.length, 2);
 });
 
 test("no match returns the exact error without a bank call", async (t) => {
@@ -196,9 +196,9 @@ for (const raw of [null, { ...RAW, transaction_id: null }, { ...RAW, transaction
 
 test("exhausted owning session budget blocks HTTP; another session's budget is irrelevant", async (t) => {
   const { env, read, mock, bumps } = await setup(t);
-  env.DB.sqlite.prepare("UPDATE eb_sessions SET refresh_count_today = 3, refresh_count_date = '2030-01-01' WHERE id = 'selected'").run();
+  env.DB.sqlite.prepare("UPDATE eb_sessions SET refresh_count_today = 2, refresh_count_date = '2030-01-01' WHERE id = 'selected'").run();
   assert.deepEqual(await read(), {
-    error: "Daily refresh budget (3) used; serving cached data. Budget resets at midnight UTC.", budget_left_today: 0,
+    error: "Daily refresh budget (2) used; serving cached data. Budget resets at midnight UTC.", budget_left_today: 0,
   });
   assert.equal(mock.calls.length, 0);
   assert.deepEqual(bumps, []);
@@ -206,8 +206,8 @@ test("exhausted owning session budget blocks HTTP; another session's budget is i
 
 test("success uses one GET, bumps only its session once, sanitizes both records, and caches detail for a free second lookup", async (t) => {
   const { env, read, mock, bumps } = await setup(t);
-  env.DB.sqlite.prepare("UPDATE eb_sessions SET refresh_count_today = 1, refresh_count_date = '2030-01-01' WHERE id = 'selected'").run();
-  env.DB.sqlite.prepare("UPDATE eb_sessions SET refresh_count_today = 3, refresh_count_date = '2030-01-01' WHERE id = 'other'").run();
+  env.DB.sqlite.prepare("UPDATE eb_sessions SET refresh_count_today = 0, refresh_count_date = '2030-01-01' WHERE id = 'selected'").run();
+  env.DB.sqlite.prepare("UPDATE eb_sessions SET refresh_count_today = 2, refresh_count_date = '2030-01-01' WHERE id = 'other'").run();
   const before = snapshot(env);
   const result = await read();
   const expected = {
@@ -219,9 +219,9 @@ test("success uses one GET, bumps only its session once, sanitizes both records,
   assert.deepEqual(result, { ...expected, list_row: { ...expected, creditor_name: null, debtor_name: null,
     note: null, bank_transaction_code: { description: null }, reference_number: null, merchant_category_code: null }, budget_left_today: 1 });
   assert.equal(JSON.stringify(result).includes("hidden-"), false);
-  assert.deepEqual(bumps, [["selected", "2030-01-01", 3]]);
-  assert.equal(env.DB.sqlite.prepare("SELECT refresh_count_today AS n FROM eb_sessions WHERE id = 'selected'").get().n, 2);
-  assert.equal(env.DB.sqlite.prepare("SELECT refresh_count_today AS n FROM eb_sessions WHERE id = 'other'").get().n, 3);
+  assert.deepEqual(bumps, [["selected", "2030-01-01", 2]]);
+  assert.equal(env.DB.sqlite.prepare("SELECT refresh_count_today AS n FROM eb_sessions WHERE id = 'selected'").get().n, 1);
+  assert.equal(env.DB.sqlite.prepare("SELECT refresh_count_today AS n FROM eb_sessions WHERE id = 'other'").get().n, 2);
   assert.deepEqual(mock.calls.map(({ method, path }) => ({ method, path })), [{ method: "GET", path: "/accounts/account/transactions/detail-id" }]);
   const stored = snapshot(env);
   assert.deepEqual(JSON.parse(stored.transactions[0].raw), { ...RAW, detail: DETAIL });
@@ -237,11 +237,11 @@ test("success uses one GET, bumps only its session once, sanitizes both records,
 
 test("UTC day rollover restores budget and banks may return the unchanged list record", async (t) => {
   const { env, read, bumps } = await setup(t, { "GET /accounts/account/transactions/detail-id": RAW });
-  env.DB.sqlite.prepare("UPDATE eb_sessions SET refresh_count_today = 3, refresh_count_date = '2029-12-31'").run();
+  env.DB.sqlite.prepare("UPDATE eb_sessions SET refresh_count_today = 2, refresh_count_date = '2029-12-31'").run();
   const { list_row, budget_left_today, ...detail } = await read();
   assert.deepEqual(detail, list_row);
-  assert.equal(budget_left_today, 2);
-  assert.deepEqual(bumps, [["selected", "2030-01-01", 3]]);
+  assert.equal(budget_left_today, 1);
+  assert.deepEqual(bumps, [["selected", "2030-01-01", 2]]);
 });
 
 for (const [status, body, expected] of [
@@ -260,7 +260,7 @@ for (const [status, body, expected] of [
     const before = snapshot(env);
     assert.deepEqual(await read(), { error: expected });
     assert.equal(mock.calls.length, 1);
-    assert.deepEqual(bumps, [["selected", "2030-01-01", 3]]);
+    assert.deepEqual(bumps, [["selected", "2030-01-01", 2]]);
     assert.equal(env.DB.sqlite.prepare("SELECT refresh_count_today AS n FROM eb_sessions WHERE id = 'selected'").get().n, 1);
     assert.deepEqual(snapshot(env), before);
   });
@@ -272,7 +272,7 @@ test("network exception messages never reach callers", async (t) => {
   });
   assert.deepEqual(await read(), { error: "transaction_details_failed" });
   assert.equal(mock.calls.length, 1);
-  assert.deepEqual(bumps, [["selected", "2030-01-01", 3]]);
+  assert.deepEqual(bumps, [["selected", "2030-01-01", 2]]);
   assert.equal(env.DB.sqlite.prepare("SELECT refresh_count_today AS n FROM eb_sessions WHERE id = 'selected'").get().n, 1);
 });
 
@@ -370,12 +370,12 @@ test("prepare caches the JWT without HTTP, and dispatch reuses it", async (t) =>
 test("NULL budget date resets an exhausted stored count before a detail request", async (t) => {
   const { env, read, mock } = await setup(t);
   env.DB.sqlite.prepare("UPDATE eb_sessions SET refresh_count_today = 9, refresh_count_date = NULL WHERE id = 'selected'").run();
-  assert.equal((await read()).budget_left_today, 2);
+  assert.equal((await read()).budget_left_today, 1);
   assert.equal(env.DB.sqlite.prepare("SELECT refresh_count_today AS n FROM eb_sessions WHERE id = 'selected'").get().n, 1);
   assert.equal(mock.calls.length, 1);
 });
 
-test("concurrent successful details report their own RETURNING counts: 2 then 1 left", async (t) => {
+test("concurrent successful details report their own RETURNING counts: 1 then 0 left", async (t) => {
   const { env, db, read, mock } = await setup(t, {
     "GET /accounts/account/transactions/detail-id": DETAIL,
     "GET /accounts/account/transactions/second-id": DETAIL,
@@ -391,7 +391,7 @@ test("concurrent successful details report their own RETURNING counts: 2 then 1 
     return charge(...args);
   };
   const results = await Promise.all([read({ ...INPUT, transaction_id: "detail-id" }), read({ ...INPUT, transaction_id: "second-id" })]);
-  assert.deepEqual(results.map((r) => r.budget_left_today).sort().reverse(), [2, 1]);
+  assert.deepEqual(results.map((r) => r.budget_left_today).sort().reverse(), [1, 0]);
   assert.equal(mock.calls.length, 2);
   assert.equal(env.DB.sqlite.prepare("SELECT refresh_count_today AS n FROM eb_sessions WHERE id = 'selected'").get().n, 2);
 });

@@ -50,7 +50,7 @@ Normal order: list_accounts to resolve accounts, then get_balances or get_transa
 
 Rows whose bank text is only the account holder's own name are automatically enriched from the bank's detail record during sync (capped per night); get_transaction_details returns the cached detail for free and only calls the bank when no detail is cached yet (one bank fetch from the daily budget). Enrichment's backfill window and per-account/per-session caps are configurable, both per refresh_now call and, for the nightly sync, via optional Worker vars — the built-in figures (45 days, 3 per account, 6 per bank session) are conservative starting recommendations, not fixed defaults or documented bank limits. Preview a run with refresh_now's enrichment_dry_run before spending live budget.
 
-refresh_now fetches transactions and balances from the bank. It is budgeted: 3 per bank session per UTC day, because banks allow roughly 4 unattended fetches a day and the nightly sync reserves one. A failed attempt can still consume budget. Never call refresh_now to test connectivity.
+refresh_now fetches transactions and balances from the bank. It is budgeted: 2 per bank session per UTC day, because banks allow roughly 4 unattended fetches a day and the two scheduled syncs (04:00 and 16:00 UTC) reserve two. A failed attempt can still consume budget. Never call refresh_now to test connectivity.
 
 get_auth_status returns cached session metadata plus the last verified live call by default. Set verify=true to check stored sessions via Enable Banking, with a 15-minute server-side cooldown; live_cached=true means the stored verification result was reused. Verification does not refresh account data; its upstream budget cost is undocumented. Cached status can read active while the bank session has in fact expired; last_live_* is the authority. Use get_auth_status, not refresh_now, to check whether the connection is healthy.
 
@@ -522,7 +522,7 @@ export class BankingMCP extends McpAgent<Env, Record<string, never>, Record<stri
       "refresh_now",
       {
         description:
-          "Fetch fresh bank data via Enable Banking and update the local cache; this fetches transactions and balances. Use only when fresh data is needed, never as a connectivity test. Budget: 3 per bank session per UTC day; a failed attempt can still count. Supports an optional account filter. Enrichment of own-name transfers during this refresh is configurable via enrichment_backfill_days and enrichment_max (see their descriptions for recommended values, not selected defaults); enrichment_dry_run previews candidate counts for free.",
+          "Fetch fresh bank data via Enable Banking and update the local cache; this fetches transactions and balances. Use only when fresh data is needed, never as a connectivity test. Budget: 2 per bank session per UTC day; a failed attempt can still count. Supports an optional account filter. Enrichment of own-name transfers during this refresh is configurable via enrichment_backfill_days and enrichment_max (see their descriptions for recommended values, not selected defaults); enrichment_dry_run previews candidate counts for free.",
         inputSchema: {
           account: z.string().optional().describe("Account name, IBAN, uid or bank name. Omit for all accounts."),
           strategy: z.enum(["default", "longest"]).optional().describe('"longest" asks the bank for the deepest available history (use once after a re-authorization for backfill); omit for normal refreshes.'),
