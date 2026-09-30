@@ -38,7 +38,7 @@
     "db:schema": "node scripts/run-wrangler.mjs d1 execute banking-mcp-db --local --file=schema.sql"
   },
   "dependencies": {
-    "@cloudflare/workers-oauth-provider": "^0.10.3",
+    "@cloudflare/workers-oauth-provider": "^1.1.0",
     "@modelcontextprotocol/sdk": "1.30.0",
     "agents": "^0.24.0",
     "jose": "^6.2.12",
